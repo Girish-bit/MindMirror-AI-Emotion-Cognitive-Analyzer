@@ -1,5 +1,5 @@
 import { GoogleGenAI, Type } from "@google/genai";
-import { AnalysisResult } from "../types";
+import { AnalysisResult, SessionMode } from "../types";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
 
@@ -83,6 +83,87 @@ export async function analyzeFace(base64Image: string): Promise<AnalysisResult> 
     };
   } catch (error) {
     console.error("Face analysis failed:", error);
+    throw error;
+  }
+}
+
+export async function analyzeMultimodal(
+  base64Image: string, 
+  base64Audio?: string, 
+  textContext?: string,
+  mode: SessionMode = 'Standard'
+): Promise<AnalysisResult> {
+  const model = "gemini-3.1-flash-lite-preview";
+  
+  const systemInstruction = `You are a top 1% AI systems architect and cognitive scientist. 
+  Your task is to perform multimodal fusion of facial cues, voice tone, and optional text context.
+  
+  MODE: ${mode}
+  
+  ANALYSIS REQUIREMENTS:
+  1. Face: Identify emotion, engagement, cognitive state, and GAZE direction.
+  2. Voice (if provided): Identify tone, pitch, and emotional resonance.
+  3. Text (if provided): Analyze sentiment and intent.
+  4. Fusion: Combine all signals into a single, high-fidelity inference.
+  5. Attention Score: Calculate a score (0-100) based on gaze and engagement.
+  6. Stress Level: Calculate a score (0-100) based on micro-expressions and voice tension.
+  
+  Return ONLY a valid JSON object.`;
+
+  const prompt = `Perform a deep multimodal analysis. ${textContext ? `Context: ${textContext}` : ""}`;
+
+  const contents: any[] = [{ parts: [{ text: prompt }] }];
+  
+  // Add Image
+  contents[0].parts.push({
+    inlineData: {
+      mimeType: "image/jpeg",
+      data: base64Image.split(",")[1],
+    },
+  });
+
+  // Add Audio (if provided)
+  if (base64Audio) {
+    contents[0].parts.push({
+      inlineData: {
+        mimeType: "audio/wav",
+        data: base64Audio.split(",")[1],
+      },
+    });
+  }
+
+  try {
+    const response = await ai.models.generateContent({
+      model,
+      contents,
+      config: {
+        systemInstruction,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            emotion: { type: Type.STRING },
+            confidence: { type: Type.NUMBER },
+            engagement: { type: Type.STRING },
+            cognitiveState: { type: Type.STRING },
+            gazeDirection: { type: Type.STRING, enum: ['Center', 'Left', 'Right', 'Up', 'Down'] },
+            attentionScore: { type: Type.NUMBER },
+            voiceTone: { type: Type.STRING },
+            fusedInsight: { type: Type.STRING },
+            stressLevel: { type: Type.NUMBER }
+          },
+          required: ["emotion", "confidence", "engagement", "cognitiveState", "gazeDirection", "attentionScore", "stressLevel"],
+        },
+      },
+    });
+
+    const result = JSON.parse(response.text || "{}");
+    return {
+      ...result,
+      timestamp: Date.now(),
+    };
+  } catch (error) {
+    console.error("Multimodal analysis failed:", error);
     throw error;
   }
 }

@@ -4,6 +4,8 @@ export type Emotion =
   | 'Shame' | 'Guilt' | 'Awe' | 'Contentment' | 'Amusement' | 'Relief' 
   | 'Embarrassment' | 'Excitement' | 'Frustration' | 'Curiosity' | 'Determination';
 
+export type SessionMode = 'Student' | 'Interview' | 'Agriculture' | 'Standard';
+
 export interface AnalysisResult {
   emotion: Emotion;
   confidence: number;
@@ -11,6 +13,19 @@ export interface AnalysisResult {
   cognitiveState: 'Thinking' | 'Confused' | 'Stressed' | 'Relaxed' | 'Curious' | 'Determined';
   timestamp: number;
   walletItems?: string[];
+  // Advanced Multimodal Fields
+  gazeDirection?: 'Center' | 'Left' | 'Right' | 'Up' | 'Down';
+  attentionScore?: number; // 0-100
+  voiceTone?: string;
+  fusedInsight?: string;
+  stressLevel?: number; // 0-100
+}
+
+export interface UserBaseline {
+  uid: string;
+  averageFocus: number;
+  commonEmotions: Emotion[];
+  lastUpdated: number;
 }
 
 export interface UserProfile {

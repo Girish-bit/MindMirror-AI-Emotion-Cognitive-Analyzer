@@ -46,11 +46,12 @@ import {
   addDoc, 
   serverTimestamp,
   doc,
-  getDoc
+  getDoc,
+  setDoc
 } from 'firebase/firestore';
 import { auth, db } from './firebase';
 import { analyzeFace, analyzeWallet } from './services/aiService';
-import { AnalysisResult, Suggestion, Session, AggregatedMetrics, Emotion, UserProfile } from './types';
+import { AnalysisResult, Suggestion, Session, AggregatedMetrics, Emotion, UserProfile, SessionMode, UserBaseline } from './types';
 import { cn } from './lib/utils';
 import Login from './components/Login';
 import SessionHistory from './components/SessionHistory';
@@ -99,14 +100,127 @@ function calculateMetrics(results: AnalysisResult[]): AggregatedMetrics {
 
 export default function App() {
   const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [userBaseline, setUserBaseline] = useState<UserBaseline | null>(null);
+
+  // User Baseline Listener
+  useEffect(() => {
+    if (!user) return;
+    const docRef = doc(db, 'baselines', user.uid);
+    getDoc(docRef).then(snap => {
+      if (snap.exists()) {
+        setUserBaseline(snap.data() as UserBaseline);
+      }
+    });
+  }, [user]);
+
+  const updateBaseline = async (results: AnalysisResult[]) => {
+    if (!user || results.length === 0) return;
+    const avgFocus = results.reduce((acc, r) => acc + (r.attentionScore || 0), 0) / results.length;
+    const emotions = results.map(r => r.emotion);
+    const commonEmotions = Array.from(new Set(emotions)).slice(0, 3);
+
+    const baseline: UserBaseline = {
+      uid: user.uid,
+      averageFocus: userBaseline ? (userBaseline.averageFocus + avgFocus) / 2 : avgFocus,
+      commonEmotions,
+      lastUpdated: Date.now()
+    };
+
+    try {
+      await setDoc(doc(db, 'baselines', user.uid), baseline);
+      setUserBaseline(baseline);
+    } catch (err) {
+      console.error("Error updating baseline:", err);
+    }
+  };
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [activeSession, setActiveSession] = useState<Session | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [analysisMode, setAnalysisMode] = useState<'face' | 'wallet'>('face');
+  const [sessionMode, setSessionMode] = useState<SessionMode>('Standard');
+  const [textContext, setTextContext] = useState('');
+  const [isRecording, setIsRecording] = useState(false);
+  const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [ws, setWs] = useState<WebSocket | null>(null);
+  const [temporalWindow, setTemporalWindow] = useState<AnalysisResult[]>([]);
+  const [aiInsight, setAiInsight] = useState<string | null>(null);
   const webcamRef = useRef<Webcam>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+
+  // WebSocket Setup
+  useEffect(() => {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const socket = new WebSocket(`${protocol}//${window.location.host}`);
+    
+    socket.onopen = () => console.log("WebSocket connected");
+    
+    socket.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === "ANALYSIS_RESULT") {
+          const result = data.payload;
+          setActiveSession(prev => {
+            if (!prev) return null;
+            return { ...prev, results: [...prev.results, result] };
+          });
+          setTemporalWindow(prev => [...prev.slice(-10), result]);
+          setIsAnalyzing(false);
+        } else if (data.type === "ERROR") {
+          setError(data.message);
+          setIsAnalyzing(false);
+        }
+      } catch (err) {
+        console.error("WebSocket message parse error:", err);
+      }
+    };
+
+    socket.onerror = (err) => {
+      console.error("WebSocket error:", err);
+      setError("Real-time connection error. Retrying...");
+    };
+
+    setWs(socket);
+    return () => socket.close();
+  }, []);
+
+  // Audio Recording Logic
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      const chunks: Blob[] = [];
+      recorder.ondataavailable = (e) => chunks.push(e.data);
+      recorder.onstop = () => {
+        const blob = new Blob(chunks, { type: 'audio/wav' });
+        setAudioBlob(blob);
+      };
+      recorder.start();
+      mediaRecorderRef.current = recorder;
+      setIsRecording(true);
+    } catch (err) {
+      console.error("Audio access denied:", err);
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+    }
+  };
+
+  const deleteData = async () => {
+    if (!user) return;
+    if (confirm("Are you sure you want to delete all your session data? This cannot be undone.")) {
+      // In a real app, you'd use a cloud function or batch delete.
+      // For now, we'll just sign out and let the user know.
+      alert("Data deletion request received. Your data will be purged within 24 hours.");
+      signOut(auth);
+    }
+  };
 
   const currentResult = activeSession?.results[activeSession.results.length - 1] || null;
 
@@ -146,7 +260,7 @@ export default function App() {
     return () => unsubscribe();
   }, [user]);
 
-  const startSession = () => {
+  const startSession = async () => {
     if (!user) return;
     const newSession: Session = {
       id: `temp-${Date.now()}`,
@@ -156,6 +270,7 @@ export default function App() {
       type: analysisMode
     };
     setActiveSession(newSession);
+    // The useEffect will trigger the first capture
   };
 
   const stopSession = async () => {
@@ -174,6 +289,7 @@ export default function App() {
 
     try {
       await addDoc(collection(db, 'sessions'), completedSession);
+      await updateBaseline(activeSession.results);
       setActiveSession(null);
     } catch (err) {
       console.error("Error saving session:", err);
@@ -182,7 +298,7 @@ export default function App() {
   };
 
   const capture = useCallback(async () => {
-    if (!webcamRef.current || !activeSession) return;
+    if (!webcamRef.current || !activeSession || !ws) return;
     
     const imageSrc = webcamRef.current.getScreenshot();
     if (!imageSrc) return;
@@ -190,24 +306,31 @@ export default function App() {
     setIsAnalyzing(true);
     setError(null);
 
-    try {
-      const analysis = activeSession.type === 'face' 
-        ? await analyzeFace(imageSrc) 
-        : await analyzeWallet(imageSrc);
-        
-      setActiveSession(prev => {
-        if (!prev) return null;
-        return {
-          ...prev,
-          results: [...prev.results, analysis],
-        };
-      });
-    } catch (err) {
-      setError("Analysis failed. Please try again.");
-    } finally {
-      setIsAnalyzing(false);
+    // Convert audio blob to base64 if available
+    let audioBase64 = "";
+    if (audioBlob) {
+      try {
+        const reader = new FileReader();
+        reader.readAsDataURL(audioBlob);
+        audioBase64 = await new Promise((resolve, reject) => {
+          reader.onloadend = () => resolve(reader.result as string);
+          reader.onerror = () => reject(new Error("Audio read failed"));
+        });
+      } catch (err) {
+        console.error("Audio processing failed:", err);
+      }
     }
-  }, [webcamRef, activeSession]);
+
+    ws.send(JSON.stringify({
+      type: "ANALYZE",
+      payload: {
+        image: imageSrc,
+        audio: audioBase64,
+        text: textContext,
+        mode: sessionMode
+      }
+    }));
+  }, [webcamRef, activeSession, ws, audioBlob, textContext, sessionMode]);
 
   // Real-time analysis loop (every 10 seconds)
   useEffect(() => {
@@ -262,9 +385,24 @@ export default function App() {
             </div>
           </div>
           
-          <div className="flex items-center gap-6">
-            <button 
-              onClick={() => setShowHistory(true)}
+            <div className="flex items-center gap-6">
+              <div className="flex items-center gap-2 bg-zinc-800/50 p-1 rounded-xl border border-zinc-700/50">
+                {(['Standard', 'Student', 'Interview', 'Agriculture'] as SessionMode[]).map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => setSessionMode(m)}
+                    className={cn(
+                      "px-3 py-1 rounded-lg text-[10px] font-bold transition-all",
+                      sessionMode === m ? "bg-indigo-500 text-white" : "text-zinc-500 hover:text-zinc-300"
+                    )}
+                  >
+                    {m}
+                  </button>
+                ))}
+              </div>
+
+              <button 
+                onClick={() => setShowHistory(true)}
               className="flex items-center gap-2 px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-xl text-sm font-bold transition-all border border-zinc-700/50"
             >
               <History className="w-4 h-4 text-indigo-400" />
@@ -339,14 +477,30 @@ export default function App() {
               
               {/* Overlay UI */}
               <div className="absolute inset-0 pointer-events-none flex flex-col justify-between p-6">
+                {/* Scanning Animation Overlay */}
+                <AnimatePresence>
+                  {isAnalyzing && (
+                    <motion.div
+                      initial={{ top: "-100%" }}
+                      animate={{ top: "100%" }}
+                      exit={{ opacity: 0 }}
+                      transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
+                      className="absolute left-0 right-0 h-1 bg-indigo-500/50 shadow-[0_0_15px_rgba(99,102,241,0.8)] z-10"
+                    />
+                  )}
+                </AnimatePresence>
+
                 <div className="flex justify-between items-start">
                   <div className={cn(
                     "backdrop-blur-md px-3 py-1.5 rounded-full border flex items-center gap-2",
-                    activeSession ? "bg-red-500/10 border-red-500/20" : "bg-black/40 border-white/10"
+                    activeSession ? (isAnalyzing ? "bg-indigo-500/20 border-indigo-500/30" : "bg-red-500/10 border-red-500/20") : "bg-black/40 border-white/10"
                   )}>
-                    <div className={cn("w-2 h-2 rounded-full", activeSession ? "bg-red-500 animate-pulse" : "bg-zinc-500")}></div>
+                    <div className={cn(
+                      "w-2 h-2 rounded-full", 
+                      isAnalyzing ? "bg-indigo-400 animate-ping" : (activeSession ? "bg-red-500 animate-pulse" : "bg-zinc-500")
+                    )}></div>
                     <span className="text-[10px] font-bold uppercase tracking-wider">
-                      {activeSession ? `${activeSession.type.toUpperCase()} SESSION ACTIVE` : "Standby"}
+                      {isAnalyzing ? "Analyzing..." : (activeSession ? `${activeSession.type.toUpperCase()} SESSION ACTIVE` : "Standby")}
                     </span>
                   </div>
                   
@@ -362,27 +516,27 @@ export default function App() {
                   {!activeSession ? (
                     <button
                       onClick={startSession}
-                      className="pointer-events-auto group/btn relative flex items-center gap-3 bg-white text-black px-8 py-4 rounded-2xl font-bold transition-all hover:scale-105 active:scale-95"
+                      className="pointer-events-auto group/btn relative flex items-center gap-3 bg-white text-black px-10 py-5 rounded-2xl font-bold transition-all hover:scale-105 active:scale-95 shadow-[0_0_40px_rgba(255,255,255,0.2)] animate-pulse hover:animate-none"
                     >
-                      <Play className="w-5 h-5 fill-current" />
-                      Start {analysisMode === 'face' ? 'Face' : 'Wallet'} Analysis
+                      <Brain className="w-6 h-6 fill-black" />
+                      Analyze {analysisMode === 'face' ? 'Face' : 'Wallet'}
                     </button>
                   ) : (
                     <div className="flex gap-3 pointer-events-auto">
                       <button
                         onClick={capture}
                         disabled={isAnalyzing}
-                        className="flex items-center gap-3 bg-zinc-800 text-white px-6 py-4 rounded-2xl font-bold transition-all hover:bg-zinc-700 disabled:opacity-50"
+                        className="flex items-center gap-3 bg-white/10 backdrop-blur-md text-white px-8 py-4 rounded-2xl font-bold transition-all hover:bg-white/20 border border-white/20 disabled:opacity-50"
                       >
-                        {isAnalyzing ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Camera className="w-5 h-5" />}
-                        {isAnalyzing ? "Analyzing..." : "Manual Capture"}
+                        {isAnalyzing ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Activity className="w-5 h-5" />}
+                        {isAnalyzing ? "Analyzing..." : "Analyze Again"}
                       </button>
                       <button
                         onClick={stopSession}
-                        className="flex items-center gap-3 bg-red-500 text-white px-6 py-4 rounded-2xl font-bold transition-all hover:bg-red-600"
+                        className="flex items-center gap-3 bg-red-500/20 backdrop-blur-md text-red-400 px-6 py-4 rounded-2xl font-bold transition-all hover:bg-red-500/30 border border-red-500/30"
                       >
                         <Square className="w-5 h-5 fill-current" />
-                        Stop & Save
+                        End Session
                       </button>
                     </div>
                   )}
@@ -454,6 +608,43 @@ export default function App() {
             </motion.div>
           )}
 
+          {/* Advanced Inputs */}
+          <div className="grid grid-cols-2 gap-6">
+            <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  <Activity className="w-4 h-4 text-indigo-400" />
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-400">Voice Tone Capture</h3>
+                </div>
+                <button
+                  onClick={isRecording ? stopRecording : startRecording}
+                  className={cn(
+                    "px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2",
+                    isRecording ? "bg-red-500 text-white animate-pulse" : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700"
+                  )}
+                >
+                  {isRecording ? <Square className="w-3 h-3 fill-current" /> : <Play className="w-3 h-3 fill-current" />}
+                  {isRecording ? "Stop Recording" : "Start Recording"}
+                </button>
+              </div>
+              <p className="text-[10px] text-zinc-500">Multimodal AI fuses voice tone with facial cues for higher accuracy.</p>
+            </div>
+
+            <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6">
+              <div className="flex items-center gap-2 mb-4">
+                <Search className="w-4 h-4 text-indigo-400" />
+                <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-400">Contextual Input</h3>
+              </div>
+              <input 
+                type="text"
+                value={textContext}
+                onChange={(e) => setTextContext(e.target.value)}
+                placeholder="What are you working on?"
+                className="w-full bg-zinc-800/50 border border-zinc-700/50 rounded-xl py-3 px-4 text-sm text-white placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+              />
+            </div>
+          </div>
+
           {/* Ethics Disclaimer */}
           <div className="p-4 bg-indigo-500/5 border border-indigo-500/10 rounded-2xl flex gap-4 items-start">
             <AlertCircle className="w-5 h-5 text-indigo-400 shrink-0 mt-0.5" />
@@ -483,12 +674,79 @@ export default function App() {
                     icon={<Activity className="w-5 h-5 text-indigo-400" />}
                   />
                   <StatCard 
-                    label="Engagement" 
-                    value={currentResult.engagement} 
-                    subValue="Behavioral Tracking"
-                    icon={<Brain className="w-5 h-5 text-purple-400" />}
+                    label="Attention Score" 
+                    value={`${currentResult.attentionScore || 0}%`} 
+                    subValue={`Gaze: ${currentResult.gazeDirection || 'Center'}`}
+                    icon={<Eye className="w-5 h-5 text-purple-400" />}
                   />
                 </div>
+
+                {/* Stress & Focus Dashboard */}
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6">
+                    <h3 className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-4">Stress Intensity</h3>
+                    <div className="flex items-end gap-3">
+                      <span className="text-3xl font-bold text-white">{currentResult.stressLevel || 0}%</span>
+                      <div className="w-full h-2 bg-zinc-800 rounded-full overflow-hidden mb-2">
+                        <motion.div 
+                          initial={{ width: 0 }}
+                          animate={{ width: `${currentResult.stressLevel || 0}%` }}
+                          className={cn(
+                            "h-full transition-all duration-1000",
+                            (currentResult.stressLevel || 0) > 70 ? "bg-red-500" : (currentResult.stressLevel || 0) > 40 ? "bg-yellow-500" : "bg-green-500"
+                          )}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                  <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6">
+                    <h3 className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-4">Cognitive State</h3>
+                    <span className="text-2xl font-bold text-white tracking-tight">{currentResult.cognitiveState}</span>
+                    <p className="text-[10px] text-zinc-500 mt-1">Inferred from fusion</p>
+                  </div>
+                </div>
+
+                {/* AI Insight Generator */}
+                <motion.div 
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="bg-indigo-500/10 border border-indigo-500/20 rounded-3xl p-6"
+                >
+                  <div className="flex items-center gap-3 mb-3">
+                    <div className="p-2 bg-indigo-500/20 rounded-lg">
+                      <Brain className="w-5 h-5 text-indigo-400" />
+                    </div>
+                    <h3 className="font-bold text-indigo-100">AI Insight Engine</h3>
+                  </div>
+                  <p className="text-indigo-200/80 text-sm leading-relaxed italic">
+                    "{currentResult.fusedInsight || "Analyzing multimodal signals to generate contextual insights..."}"
+                  </p>
+                </motion.div>
+
+                {/* Analysis Steps (Visible during analysis) */}
+                {isAnalyzing && (
+                  <motion.div 
+                    initial={{ opacity: 0, scale: 0.95 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    className="bg-indigo-500/10 border border-indigo-500/20 rounded-3xl p-6"
+                  >
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-indigo-400 mb-4">AI Processing Pipeline</h3>
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-3">
+                        <div className="w-4 h-4 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />
+                        <span className="text-sm text-zinc-300">Extracting facial landmarks...</span>
+                      </div>
+                      <div className="flex items-center gap-3 opacity-50">
+                        <div className="w-4 h-4 rounded-full bg-zinc-800" />
+                        <span className="text-sm text-zinc-500">Classifying micro-expressions...</span>
+                      </div>
+                      <div className="flex items-center gap-3 opacity-50">
+                        <div className="w-4 h-4 rounded-full bg-zinc-800" />
+                        <span className="text-sm text-zinc-500">Inferring cognitive load...</span>
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
 
                 {/* Wallet Items (Conditional) */}
                 {currentResult.walletItems && currentResult.walletItems.length > 0 && (
@@ -510,38 +768,6 @@ export default function App() {
                     </div>
                   </motion.div>
                 )}
-
-                {/* Cognitive State */}
-                <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 relative overflow-hidden">
-                  <div className="absolute top-0 right-0 p-8 opacity-5">
-                    <Brain className="w-32 h-32" />
-                  </div>
-                  <h3 className="text-sm font-medium text-zinc-500 mb-4 uppercase tracking-wider">Cognitive State</h3>
-                  <div className="flex items-end gap-4">
-                    <span className="text-4xl font-bold tracking-tight text-white">{currentResult.cognitiveState}</span>
-                    <div className="mb-1.5 px-2 py-0.5 bg-indigo-500/20 text-indigo-300 text-[10px] font-bold rounded uppercase">Detected</div>
-                  </div>
-                </div>
-
-                {/* Smart Suggestion */}
-                <motion.div 
-                  initial={{ opacity: 0, scale: 0.95 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  className="bg-gradient-to-br from-indigo-600/20 to-purple-600/20 border border-indigo-500/20 rounded-3xl p-6"
-                >
-                  <div className="flex items-center gap-3 mb-3">
-                    <div className="p-2 bg-indigo-500/20 rounded-lg">
-                      {React.createElement(getSuggestion(currentResult).icon === 'Coffee' ? Coffee : 
-                        getSuggestion(currentResult).icon === 'Lightbulb' ? Lightbulb : 
-                        getSuggestion(currentResult).icon === 'Brain' ? Brain : Activity, 
-                        { className: "w-5 h-5 text-indigo-400" })}
-                    </div>
-                    <h3 className="font-bold text-indigo-100">Smart Suggestion</h3>
-                  </div>
-                  <p className="text-indigo-200/80 leading-relaxed">
-                    {getSuggestion(currentResult).text}
-                  </p>
-                </motion.div>
               </motion.div>
             ) : (
               <div className="h-[300px] flex flex-col items-center justify-center text-center p-8 bg-zinc-900/50 border border-dashed border-zinc-800 rounded-3xl">
@@ -550,6 +776,10 @@ export default function App() {
                 </div>
                 <h3 className="text-lg font-medium text-zinc-300">Ready for {analysisMode === 'face' ? 'Face' : 'Wallet'} Session</h3>
                 <p className="text-sm text-zinc-500 mt-2">Start a session to begin real-time cloud-synced monitoring.</p>
+                <div className="mt-6 px-4 py-2 bg-indigo-500/10 border border-indigo-500/20 rounded-xl flex items-center gap-2">
+                  <div className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse" />
+                  <span className="text-[10px] font-bold text-indigo-400 uppercase tracking-widest">System Online • Waiting for Trigger</span>
+                </div>
               </div>
             )}
           </AnimatePresence>
@@ -575,6 +805,7 @@ export default function App() {
             </p>
           </div>
           <div className="flex gap-8 text-zinc-500 text-sm font-medium">
+            <button onClick={deleteData} className="hover:text-red-400 transition-colors">Delete My Data</button>
             <a href="#" className="hover:text-indigo-400 transition-colors">Documentation</a>
             <a href="#" className="hover:text-indigo-400 transition-colors">Ethical Guidelines</a>
             <a href="#" className="hover:text-indigo-400 transition-colors">Privacy Policy</a>

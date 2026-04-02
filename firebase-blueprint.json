@@ -28,6 +28,18 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["userId", "startTime", "type"]
+    },
+    "UserBaseline": {
+      "title": "UserBaseline",
+      "description": "User behavioral baseline data",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "averageFocus": { "type": "number" },
+        "commonEmotions": { "type": "array" },
+        "lastUpdated": { "type": "integer" }
+      },
+      "required": ["uid", "averageFocus", "commonEmotions", "lastUpdated"]
     }
   },
   "firestore": {
@@ -38,6 +50,10 @@
     "/sessions/{sessionId}": {
       "schema": "Session",
       "description": "Session analysis documents"
+    },
+    "/baselines/{userId}": {
+      "schema": "UserBaseline",
+      "description": "User baseline documents"
     }
   }
 }
