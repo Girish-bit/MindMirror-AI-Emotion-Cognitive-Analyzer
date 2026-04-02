@@ -1,0 +1,5 @@
+{
+  "name": "MindMirror AI: Emotion & Cognitive Analyzer",
+  "description": "Real-time facial expression analysis and cognitive state inference using Gemini AI vision.",
+  "requestFramePermissions": ["camera"]
+}
