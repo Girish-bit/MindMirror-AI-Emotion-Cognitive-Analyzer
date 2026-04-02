@@ -20,7 +20,10 @@ import {
   User,
   LogOut,
   Settings,
-  Bell
+  Bell,
+  Wallet,
+  Eye,
+  Search
 } from 'lucide-react';
 import { 
   LineChart, 
@@ -33,8 +36,21 @@ import {
   AreaChart,
   Area
 } from 'recharts';
-import { analyzeFace } from './services/aiService';
-import { AnalysisResult, Suggestion, Session, AggregatedMetrics, Emotion } from './types';
+import { onAuthStateChanged, signOut, User as FirebaseUser } from 'firebase/auth';
+import { 
+  collection, 
+  query, 
+  where, 
+  orderBy, 
+  onSnapshot, 
+  addDoc, 
+  serverTimestamp,
+  doc,
+  getDoc
+} from 'firebase/firestore';
+import { auth, db } from './firebase';
+import { analyzeFace, analyzeWallet } from './services/aiService';
+import { AnalysisResult, Suggestion, Session, AggregatedMetrics, Emotion, UserProfile } from './types';
 import { cn } from './lib/utils';
 import Login from './components/Login';
 import SessionHistory from './components/SessionHistory';
@@ -82,34 +98,87 @@ function calculateMetrics(results: AnalysisResult[]): AggregatedMetrics {
 }
 
 export default function App() {
-  const [user, setUser] = useState<{ email: string } | null>(null);
+  const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [activeSession, setActiveSession] = useState<Session | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [showHistory, setShowHistory] = useState(false);
+  const [analysisMode, setAnalysisMode] = useState<'face' | 'wallet'>('face');
   const [error, setError] = useState<string | null>(null);
   const webcamRef = useRef<Webcam>(null);
 
   const currentResult = activeSession?.results[activeSession.results.length - 1] || null;
 
+  // Auth Listener
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      setIsAuthReady(true);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Firestore Sessions Listener
+  useEffect(() => {
+    if (!user) {
+      setSessions([]);
+      return;
+    }
+
+    const q = query(
+      collection(db, 'sessions'),
+      where('userId', '==', user.uid),
+      orderBy('startTime', 'desc')
+    );
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const sessionData = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      })) as Session[];
+      setSessions(sessionData);
+    }, (err) => {
+      console.error("Firestore error:", err);
+      setError("Failed to load history.");
+    });
+
+    return () => unsubscribe();
+  }, [user]);
+
   const startSession = () => {
+    if (!user) return;
     const newSession: Session = {
-      id: Date.now().toString(),
+      id: `temp-${Date.now()}`,
+      userId: user.uid,
       startTime: Date.now(),
       results: [],
+      type: analysisMode
     };
     setActiveSession(newSession);
   };
 
-  const stopSession = () => {
-    if (!activeSession) return;
+  const stopSession = async () => {
+    if (!activeSession || !user) return;
+    
+    const metrics = calculateMetrics(activeSession.results);
     const completedSession = {
-      ...activeSession,
+      userId: user.uid,
+      startTime: activeSession.startTime,
       endTime: Date.now(),
-      metrics: calculateMetrics(activeSession.results),
+      results: activeSession.results,
+      metrics,
+      type: activeSession.type,
+      createdAt: serverTimestamp()
     };
-    setSessions(prev => [completedSession, ...prev]);
-    setActiveSession(null);
+
+    try {
+      await addDoc(collection(db, 'sessions'), completedSession);
+      setActiveSession(null);
+    } catch (err) {
+      console.error("Error saving session:", err);
+      setError("Failed to save session to cloud.");
+    }
   };
 
   const capture = useCallback(async () => {
@@ -122,7 +191,10 @@ export default function App() {
     setError(null);
 
     try {
-      const analysis = await analyzeFace(imageSrc);
+      const analysis = activeSession.type === 'face' 
+        ? await analyzeFace(imageSrc) 
+        : await analyzeWallet(imageSrc);
+        
       setActiveSession(prev => {
         if (!prev) return null;
         return {
@@ -131,16 +203,18 @@ export default function App() {
         };
       });
     } catch (err) {
-      setError("Failed to analyze image. Please try again.");
+      setError("Analysis failed. Please try again.");
     } finally {
       setIsAnalyzing(false);
     }
   }, [webcamRef, activeSession]);
 
-  // Auto-capture every 10 seconds if session is active
+  // Real-time analysis loop (every 10 seconds)
   useEffect(() => {
     let interval: NodeJS.Timeout;
     if (activeSession) {
+      // Initial capture
+      capture();
       interval = setInterval(capture, 10000);
     }
     return () => clearInterval(interval);
@@ -154,15 +228,23 @@ export default function App() {
   };
 
   const chartData = useMemo(() => {
-    return activeSession?.results.map(r => ({
+    return activeSession?.results.slice(-20).map(r => ({
       time: new Date(r.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
       confidence: r.confidence,
       engagement: r.engagement === 'Highly Engaged' ? 100 : r.engagement === 'Focused' ? 70 : 30,
     })) || [];
   }, [activeSession]);
 
+  if (!isAuthReady) {
+    return (
+      <div className="min-h-screen bg-[#050505] flex items-center justify-center">
+        <RefreshCw className="w-8 h-8 text-indigo-500 animate-spin" />
+      </div>
+    );
+  }
+
   if (!user) {
-    return <Login onLogin={(email) => setUser({ email })} />;
+    return <Login />;
   }
 
   return (
@@ -176,7 +258,7 @@ export default function App() {
             </div>
             <div>
               <h1 className="text-xl font-bold tracking-tight">MindMirror <span className="text-indigo-400">AI</span></h1>
-              <p className="text-xs text-zinc-500 font-medium uppercase tracking-widest">Cognitive State Analyzer</p>
+              <p className="text-xs text-zinc-500 font-medium uppercase tracking-widest">Cognitive & Object Intelligence</p>
             </div>
           </div>
           
@@ -188,26 +270,41 @@ export default function App() {
               <History className="w-4 h-4 text-indigo-400" />
               History
             </button>
-            
-            <div className="hidden md:flex items-center gap-4 text-xs font-medium text-zinc-400 bg-zinc-800/50 px-4 py-2 rounded-full border border-zinc-700/50">
-              <Info className="w-4 h-4" />
-              <span>Inference based on behavioral cues. Not mind reading.</span>
+
+            <div className="hidden md:flex items-center gap-2 bg-zinc-800/50 p-1 rounded-xl border border-zinc-700/50">
+              <button 
+                onClick={() => setAnalysisMode('face')}
+                className={cn(
+                  "px-4 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-2",
+                  analysisMode === 'face' ? "bg-indigo-500 text-white shadow-lg shadow-indigo-500/20" : "text-zinc-500 hover:text-zinc-300"
+                )}
+              >
+                <User className="w-3.5 h-3.5" />
+                Face
+              </button>
+              <button 
+                onClick={() => setAnalysisMode('wallet')}
+                className={cn(
+                  "px-4 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-2",
+                  analysisMode === 'wallet' ? "bg-indigo-500 text-white shadow-lg shadow-indigo-500/20" : "text-zinc-500 hover:text-zinc-300"
+                )}
+              >
+                <Wallet className="w-3.5 h-3.5" />
+                Wallet
+              </button>
             </div>
             
             <div className="flex items-center gap-3 border-l border-zinc-800 pl-6">
-              <button className="p-2 text-zinc-500 hover:text-white transition-colors">
-                <Bell className="w-5 h-5" />
-              </button>
               <div className="flex items-center gap-3 bg-zinc-800/50 px-3 py-1.5 rounded-2xl border border-zinc-700/50">
-                <div className="w-8 h-8 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-xl flex items-center justify-center font-bold text-xs">
-                  {user.email[0].toUpperCase()}
+                <div className="w-8 h-8 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-xl flex items-center justify-center font-bold text-xs overflow-hidden">
+                  {user.photoURL ? <img src={user.photoURL} alt="Avatar" referrerPolicy="no-referrer" /> : user.email?.[0].toUpperCase()}
                 </div>
                 <div className="hidden sm:block">
                   <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider leading-none mb-1">User Profile</p>
-                  <p className="text-xs font-medium text-zinc-200 leading-none">{user.email.split('@')[0]}</p>
+                  <p className="text-xs font-medium text-zinc-200 leading-none">{user.displayName || user.email?.split('@')[0]}</p>
                 </div>
                 <button 
-                  onClick={() => setUser(null)}
+                  onClick={() => signOut(auth)}
                   className="p-1.5 text-zinc-500 hover:text-red-400 transition-colors"
                 >
                   <LogOut className="w-4 h-4" />
@@ -233,11 +330,11 @@ export default function App() {
                 videoConstraints={{ facingMode: "user" }}
                 mirrored={true}
                 imageSmoothing={true}
+                screenshotQuality={0.92}
                 disablePictureInPicture={true}
                 forceScreenshotSourceSize={true}
                 onUserMedia={() => {}}
                 onUserMediaError={() => {}}
-                screenshotQuality={0.92}
               />
               
               {/* Overlay UI */}
@@ -249,9 +346,16 @@ export default function App() {
                   )}>
                     <div className={cn("w-2 h-2 rounded-full", activeSession ? "bg-red-500 animate-pulse" : "bg-zinc-500")}></div>
                     <span className="text-[10px] font-bold uppercase tracking-wider">
-                      {activeSession ? "Session Active" : "Standby"}
+                      {activeSession ? `${activeSession.type.toUpperCase()} SESSION ACTIVE` : "Standby"}
                     </span>
                   </div>
+                  
+                  {activeSession?.type === 'wallet' && (
+                    <div className="bg-indigo-500/20 backdrop-blur-md border border-indigo-500/30 px-3 py-1.5 rounded-xl flex items-center gap-2">
+                      <Search className="w-3.5 h-3.5 text-indigo-400" />
+                      <span className="text-[10px] font-bold text-indigo-200">Object Detection Mode</span>
+                    </div>
+                  )}
                 </div>
                 
                 <div className="flex justify-center gap-4">
@@ -261,7 +365,7 @@ export default function App() {
                       className="pointer-events-auto group/btn relative flex items-center gap-3 bg-white text-black px-8 py-4 rounded-2xl font-bold transition-all hover:scale-105 active:scale-95"
                     >
                       <Play className="w-5 h-5 fill-current" />
-                      Start Session
+                      Start {analysisMode === 'face' ? 'Face' : 'Wallet'} Analysis
                     </button>
                   ) : (
                     <div className="flex gap-3 pointer-events-auto">
@@ -278,7 +382,7 @@ export default function App() {
                         className="flex items-center gap-3 bg-red-500 text-white px-6 py-4 rounded-2xl font-bold transition-all hover:bg-red-600"
                       >
                         <Square className="w-5 h-5 fill-current" />
-                        Stop
+                        Stop & Save
                       </button>
                     </div>
                   )}
@@ -354,12 +458,12 @@ export default function App() {
           <div className="p-4 bg-indigo-500/5 border border-indigo-500/10 rounded-2xl flex gap-4 items-start">
             <AlertCircle className="w-5 h-5 text-indigo-400 shrink-0 mt-0.5" />
             <p className="text-sm text-zinc-400 leading-relaxed">
-              <strong className="text-zinc-200">Ethical Notice:</strong> This system uses computer vision to predict emotional and behavioral cues. It does not access private thoughts or provide medical diagnosis.
+              <strong className="text-zinc-200">Ethical Notice:</strong> This system uses computer vision to predict emotional and behavioral cues. It does not access private thoughts. Wallet detection is for demonstration purposes.
             </p>
           </div>
         </div>
 
-        {/* Right: Analytics & History */}
+        {/* Right: Analytics */}
         <div className="lg:col-span-5 space-y-6">
           <AnimatePresence mode="wait">
             {currentResult ? (
@@ -386,6 +490,27 @@ export default function App() {
                   />
                 </div>
 
+                {/* Wallet Items (Conditional) */}
+                {currentResult.walletItems && currentResult.walletItems.length > 0 && (
+                  <motion.div 
+                    initial={{ opacity: 0, x: 20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6"
+                  >
+                    <div className="flex items-center gap-2 mb-4">
+                      <Wallet className="w-4 h-4 text-indigo-400" />
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-400">Predicted Wallet Items</h3>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {currentResult.walletItems.map((item, i) => (
+                        <span key={i} className="px-3 py-1.5 bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-xs font-bold rounded-lg">
+                          {item}
+                        </span>
+                      ))}
+                    </div>
+                  </motion.div>
+                )}
+
                 {/* Cognitive State */}
                 <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 relative overflow-hidden">
                   <div className="absolute top-0 right-0 p-8 opacity-5">
@@ -408,7 +533,7 @@ export default function App() {
                     <div className="p-2 bg-indigo-500/20 rounded-lg">
                       {React.createElement(getSuggestion(currentResult).icon === 'Coffee' ? Coffee : 
                         getSuggestion(currentResult).icon === 'Lightbulb' ? Lightbulb : 
-                        getSuggestion(currentResult).icon === 'Brain' ? Brain : CheckCircle2, 
+                        getSuggestion(currentResult).icon === 'Brain' ? Brain : Activity, 
                         { className: "w-5 h-5 text-indigo-400" })}
                     </div>
                     <h3 className="font-bold text-indigo-100">Smart Suggestion</h3>
@@ -423,8 +548,8 @@ export default function App() {
                 <div className="w-16 h-16 bg-zinc-800 rounded-full flex items-center justify-center mb-4">
                   <Camera className="w-8 h-8 text-zinc-600" />
                 </div>
-                <h3 className="text-lg font-medium text-zinc-300">Ready for Session</h3>
-                <p className="text-sm text-zinc-500 mt-2">Start a session to begin real-time cognitive monitoring.</p>
+                <h3 className="text-lg font-medium text-zinc-300">Ready for {analysisMode === 'face' ? 'Face' : 'Wallet'} Session</h3>
+                <p className="text-sm text-zinc-500 mt-2">Start a session to begin real-time cloud-synced monitoring.</p>
               </div>
             )}
           </AnimatePresence>
@@ -439,10 +564,15 @@ export default function App() {
       )}
 
       <footer className="max-w-7xl mx-auto px-6 py-12 border-t border-zinc-800/50 mt-12">
-        <div className="flex flex-col md:flex-row justify-between items-center gap-6">
-          <div className="flex items-center gap-2 text-zinc-500 text-sm">
-            <Brain className="w-4 h-4" />
-            <span>© 2026 MindMirror AI Labs</span>
+        <div className="flex flex-col md:flex-row justify-between items-center gap-8">
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center gap-2 text-zinc-500 text-sm">
+              <Brain className="w-4 h-4" />
+              <span>© 2026 MindMirror AI Labs • Cloud Powered</span>
+            </div>
+            <p className="text-[10px] text-zinc-600 font-medium uppercase tracking-[0.2em]">
+              Founded by <span className="text-indigo-400/80">Girish G</span> (Founder of Blueforge digital)
+            </p>
           </div>
           <div className="flex gap-8 text-zinc-500 text-sm font-medium">
             <a href="#" className="hover:text-indigo-400 transition-colors">Documentation</a>

@@ -1,0 +1,43 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User profile information",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "role": { "type": "string", "enum": ["user", "admin"] }
+      },
+      "required": ["uid", "email"]
+    },
+    "Session": {
+      "title": "Session",
+      "description": "Analysis session data",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "startTime": { "type": "integer" },
+        "endTime": { "type": "integer" },
+        "type": { "type": "string", "enum": ["face", "wallet"] },
+        "results": { "type": "array" },
+        "metrics": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "startTime", "type"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "User profile documents"
+    },
+    "/sessions/{sessionId}": {
+      "schema": "Session",
+      "description": "Session analysis documents"
+    }
+  }
+}

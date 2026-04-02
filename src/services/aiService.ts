@@ -82,7 +82,88 @@ export async function analyzeFace(base64Image: string): Promise<AnalysisResult> 
       timestamp: Date.now(),
     };
   } catch (error) {
-    console.error("Analysis failed:", error);
+    console.error("Face analysis failed:", error);
+    throw error;
+  }
+}
+
+export async function analyzeWallet(base64Image: string): Promise<AnalysisResult> {
+  const model = "gemini-3.1-flash-lite-preview";
+  
+  const systemInstruction = `You are an expert in object detection and financial security. 
+  Your task is to analyze an image of a wallet (open or closed) and predict the items inside or visible.
+  
+  Items to look for:
+  - Credit/Debit Cards
+  - Cash (bills or coins)
+  - ID Cards/Driver's License
+  - Receipts
+  - Photos
+  - Keys
+  - Membership cards
+  
+  Also, infer the owner's likely emotional state based on the wallet's condition (e.g., organized, messy, empty, full).
+  
+  Return ONLY a valid JSON object.`;
+
+  const prompt = "Analyze this wallet image. List the predicted items and infer the emotional/cognitive state based on the wallet's presentation.";
+
+  try {
+    const response = await ai.models.generateContent({
+      model,
+      contents: [
+        {
+          parts: [
+            { text: prompt },
+            {
+              inlineData: {
+                mimeType: "image/jpeg",
+                data: base64Image.split(",")[1],
+              },
+            },
+          ],
+        },
+      ],
+      config: {
+        systemInstruction,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            emotion: { 
+              type: Type.STRING,
+              description: "Inferred emotion of the owner (e.g., 'Contentment' for organized, 'Anxiety' for empty/messy)."
+            },
+            confidence: { 
+              type: Type.NUMBER, 
+              description: "Confidence score from 0 to 100."
+            },
+            engagement: { 
+              type: Type.STRING,
+              description: "Always 'Focused' for this mode."
+            },
+            cognitiveState: { 
+              type: Type.STRING,
+              description: "Inferred state (e.g., 'Relaxed', 'Stressed')."
+            },
+            walletItems: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+              description: "List of items detected in the wallet."
+            }
+          },
+          required: ["emotion", "confidence", "engagement", "cognitiveState", "walletItems"],
+        },
+      },
+    });
+
+    const result = JSON.parse(response.text || "{}");
+    return {
+      ...result,
+      timestamp: Date.now(),
+    };
+  } catch (error) {
+    console.error("Wallet analysis failed:", error);
     throw error;
   }
 }

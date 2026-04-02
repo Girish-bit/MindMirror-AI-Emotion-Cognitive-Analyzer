@@ -8,16 +8,27 @@ export interface AnalysisResult {
   emotion: Emotion;
   confidence: number;
   engagement: 'Focused' | 'Distracted' | 'Highly Engaged';
-  cognitiveState: 'Thinking' | 'Confused' | 'Stressed' | 'Relaxed';
+  cognitiveState: 'Thinking' | 'Confused' | 'Stressed' | 'Relaxed' | 'Curious' | 'Determined';
   timestamp: number;
+  walletItems?: string[];
+}
+
+export interface UserProfile {
+  uid: string;
+  email: string;
+  displayName?: string;
+  photoURL?: string;
+  createdAt: number;
 }
 
 export interface Session {
   id: string;
+  userId: string;
   startTime: number;
   endTime?: number;
   results: AnalysisResult[];
   metrics?: AggregatedMetrics;
+  type: 'face' | 'wallet';
 }
 
 export interface AggregatedMetrics {
