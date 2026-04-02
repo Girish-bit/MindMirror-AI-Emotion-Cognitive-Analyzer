@@ -13,25 +13,37 @@ async function startServer() {
 
   app.use(express.json({ limit: '50mb' }));
 
-  // WebSocket Connection
+  // WebSocket Connection for Real-Time Streaming
   wss.on("connection", (ws: WebSocket) => {
-    console.log("Client connected via WebSocket");
+    console.log("DEBUG: High-performance stream established");
 
     ws.on("message", async (message: string) => {
       try {
         const data = JSON.parse(message);
-        if (data.type === "ANALYZE") {
-          const { image, audio, text, mode } = data.payload;
+        
+        if (data.type === "STREAM_FRAME") {
+          const { image, audio, text, mode, sessionId } = data.payload;
+          
+          // Process frame with Gemini
           const result = await analyzeMultimodal(image, audio, text, mode);
-          ws.send(JSON.stringify({ type: "ANALYSIS_RESULT", payload: result }));
+          
+          // Send back to client with original timestamp for latency tracking
+          ws.send(JSON.stringify({ 
+            type: "STREAM_RESULT", 
+            payload: result,
+            timestamp: data.timestamp 
+          }));
         }
       } catch (error) {
-        console.error("WebSocket message error:", error);
-        ws.send(JSON.stringify({ type: "ERROR", message: "Analysis failed" }));
+        console.error("DEBUG: Stream processing error:", error);
+        ws.send(JSON.stringify({ 
+          type: "STREAM_ERROR", 
+          message: error instanceof Error ? error.message : "Stream processing failed" 
+        }));
       }
     });
 
-    ws.on("close", () => console.log("Client disconnected"));
+    ws.on("close", () => console.log("DEBUG: Stream disconnected"));
   });
 
   // Vite middleware for development

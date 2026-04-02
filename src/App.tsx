@@ -50,9 +50,9 @@ import {
   setDoc
 } from 'firebase/firestore';
 import { auth, db } from './firebase';
-import { analyzeFace, analyzeWallet } from './services/aiService';
+import { analyzeFace, analyzeWallet, analyzeMultimodal } from './services/aiService';
 import { AnalysisResult, Suggestion, Session, AggregatedMetrics, Emotion, UserProfile, SessionMode, UserBaseline } from './types';
-import { cn } from './lib/utils';
+import { cn, compressImage } from './lib/utils';
 import Login from './components/Login';
 import SessionHistory from './components/SessionHistory';
 
@@ -97,6 +97,59 @@ function calculateMetrics(results: AnalysisResult[]): AggregatedMetrics {
     cognitiveStateDistribution: cognitiveDist,
   };
 }
+
+const Gauge = ({ value, label, color }: { value: number, label: string, color: string }) => (
+  <div className="relative flex flex-col items-center">
+    <svg className="w-24 h-24 transform -rotate-90">
+      <circle
+        cx="48" cy="48" r="40"
+        stroke="currentColor"
+        strokeWidth="8"
+        fill="transparent"
+        className="text-zinc-800"
+      />
+      <circle
+        cx="48" cy="48" r="40"
+        stroke={color}
+        strokeWidth="8"
+        fill="transparent"
+        strokeDasharray={251.2}
+        strokeDashoffset={251.2 - (251.2 * value) / 100}
+        strokeLinecap="round"
+        className="transition-all duration-1000 ease-out"
+      />
+    </svg>
+    <div className="absolute inset-0 flex flex-col items-center justify-center pt-2">
+      <span className="text-xl font-bold text-white">{Math.round(value)}%</span>
+    </div>
+    <span className="mt-2 text-[10px] font-bold uppercase tracking-widest text-zinc-500">{label}</span>
+  </div>
+);
+
+const InsightCard = ({ result }: { result: AnalysisResult }) => (
+  <motion.div 
+    initial={{ opacity: 0, x: 20 }}
+    animate={{ opacity: 1, x: 0 }}
+    className="bg-zinc-800/30 border border-zinc-800 p-4 rounded-2xl space-y-3"
+  >
+    <div className="flex items-start gap-3">
+      <div className="p-2 bg-indigo-500/10 rounded-lg">
+        <Brain className="w-4 h-4 text-indigo-400" />
+      </div>
+      <div className="space-y-1">
+        <p className="text-xs font-bold text-zinc-200">AI Reasoning</p>
+        <p className="text-[11px] text-zinc-400 leading-relaxed italic">"{result.reasoning}"</p>
+      </div>
+    </div>
+    <div className="flex flex-wrap gap-2">
+      {result.visualCues?.map((cue, i) => (
+        <span key={i} className="px-2 py-1 bg-zinc-900 text-[9px] font-bold text-zinc-500 rounded-md border border-zinc-800">
+          {cue}
+        </span>
+      ))}
+    </div>
+  </motion.div>
+);
 
 export default function App() {
   const [user, setUser] = useState<FirebaseUser | null>(null);
@@ -147,39 +200,29 @@ export default function App() {
   const [ws, setWs] = useState<WebSocket | null>(null);
   const [temporalWindow, setTemporalWindow] = useState<AnalysisResult[]>([]);
   const [aiInsight, setAiInsight] = useState<string | null>(null);
+  const [trends, setTrends] = useState<{ stress: string; focus: string }>({ stress: 'Stable', focus: 'Stable' });
+  const [notifications, setNotifications] = useState<{ id: number; text: string; type: 'warning' | 'info' }[]>([]);
   const webcamRef = useRef<Webcam>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
 
-  // WebSocket Setup
+  // Remove WebSocket Setup for analysis, keep for other real-time features if needed
+  // but since it's not used for anything else, we can simplify.
   useEffect(() => {
+    // We'll keep the WebSocket setup but won't use it for ANALYZE
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const socket = new WebSocket(`${protocol}//${window.location.host}`);
     
-    socket.onopen = () => console.log("WebSocket connected");
+    socket.onopen = () => {
+      console.log("DEBUG: WebSocket connected successfully");
+    };
     
     socket.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.type === "ANALYSIS_RESULT") {
-          const result = data.payload;
-          setActiveSession(prev => {
-            if (!prev) return null;
-            return { ...prev, results: [...prev.results, result] };
-          });
-          setTemporalWindow(prev => [...prev.slice(-10), result]);
-          setIsAnalyzing(false);
-        } else if (data.type === "ERROR") {
-          setError(data.message);
-          setIsAnalyzing(false);
-        }
-      } catch (err) {
-        console.error("WebSocket message parse error:", err);
-      }
+      console.log("DEBUG: WebSocket message received", event.data);
+      // Handle other WebSocket messages if any
     };
 
     socket.onerror = (err) => {
-      console.error("WebSocket error:", err);
-      setError("Real-time connection error. Retrying...");
+      console.error("DEBUG: WebSocket error:", err);
     };
 
     setWs(socket);
@@ -297,51 +340,151 @@ export default function App() {
     }
   };
 
+  const activeSessionRef = useRef<Session | null>(null);
+  useEffect(() => {
+    activeSessionRef.current = activeSession;
+  }, [activeSession]);
+
+  const [sessionDuration, setSessionDuration] = useState(0);
+
+  // Session Timer
+  useEffect(() => {
+    let timer: NodeJS.Timeout;
+    if (activeSession) {
+      timer = setInterval(() => {
+        setSessionDuration(Math.floor((Date.now() - activeSession.startTime) / 1000));
+      }, 1000);
+    } else {
+      setSessionDuration(0);
+    }
+    return () => clearInterval(timer);
+  }, [activeSession]);
+
+  const formatDuration = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  // WebSocket Setup
+  useEffect(() => {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const socket = new WebSocket(`${protocol}//${window.location.host}`);
+    
+    socket.onopen = () => {
+      console.log("DEBUG: WebSocket connected for streaming");
+      setWs(socket);
+    };
+
+    socket.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.type === "STREAM_RESULT") {
+        const result = data.payload as AnalysisResult;
+        handleAnalysisResult(result);
+      } else if (data.type === "STREAM_ERROR") {
+        setError(data.message);
+        setIsAnalyzing(false);
+      }
+    };
+
+    socket.onclose = () => setWs(null);
+    return () => socket.close();
+  }, []);
+
+  const handleAnalysisResult = useCallback((result: AnalysisResult) => {
+    setIsAnalyzing(false);
+    
+    if (result.status === 'error') {
+      setError(result.message || "Analysis failed");
+      return;
+    }
+
+    setActiveSession(prev => {
+      if (!prev) return null;
+      return { ...prev, results: [...prev.results, result] };
+    });
+
+    setTemporalWindow(prev => {
+      const newWindow = [...prev.slice(-29), result];
+      
+      // Temporal Intelligence Engine: Detect Trends
+      if (newWindow.length >= 10) {
+        const firstHalf = newWindow.slice(0, 5);
+        const secondHalf = newWindow.slice(-5);
+        
+        const avgStressStart = firstHalf.reduce((acc, r) => acc + (r.stressLevel || 0), 0) / 5;
+        const avgStressEnd = secondHalf.reduce((acc, r) => acc + (r.stressLevel || 0), 0) / 5;
+        
+        const avgFocusStart = firstHalf.reduce((acc, r) => acc + (r.attentionScore || 0), 0) / 5;
+        const avgFocusEnd = secondHalf.reduce((acc, r) => acc + (r.attentionScore || 0), 0) / 5;
+
+        const stressDelta = avgStressEnd - avgStressStart;
+        const focusDelta = avgFocusEnd - avgFocusStart;
+
+        setTrends({
+          stress: stressDelta > 15 ? "Increasing Rapidly" : stressDelta < -15 ? "Decreasing" : "Stable",
+          focus: focusDelta > 15 ? "Improving" : focusDelta < -15 ? "Declining" : "Stable"
+        });
+
+        // Smart Alerts
+        if (avgStressEnd > 80) {
+          addNotification("Critical Stress Detected", "warning");
+        }
+        if (avgFocusEnd < 30) {
+          addNotification("Low Focus Warning", "info");
+        }
+      }
+      
+      return newWindow;
+    });
+  }, []);
+
+  const addNotification = (text: string, type: 'warning' | 'info') => {
+    const id = Date.now();
+    setNotifications(prev => [...prev, { id, text, type }]);
+    setTimeout(() => {
+      setNotifications(prev => prev.filter(n => n.id !== id));
+    }, 5000);
+  };
+
   const capture = useCallback(async () => {
-    if (!webcamRef.current || !activeSession || !ws) return;
+    if (!webcamRef.current || !activeSessionRef.current || !ws || ws.readyState !== WebSocket.OPEN) return;
     
     const imageSrc = webcamRef.current.getScreenshot();
     if (!imageSrc) return;
 
     setIsAnalyzing(true);
-    setError(null);
-
-    // Convert audio blob to base64 if available
-    let audioBase64 = "";
-    if (audioBlob) {
-      try {
-        const reader = new FileReader();
-        reader.readAsDataURL(audioBlob);
-        audioBase64 = await new Promise((resolve, reject) => {
-          reader.onloadend = () => resolve(reader.result as string);
-          reader.onerror = () => reject(new Error("Audio read failed"));
-        });
-      } catch (err) {
-        console.error("Audio processing failed:", err);
-      }
+    
+    // Compress and stream
+    try {
+      const finalImage = await compressImage(imageSrc, 640, 480, 0.6);
+      
+      ws.send(JSON.stringify({
+        type: "STREAM_FRAME",
+        timestamp: Date.now(),
+        payload: {
+          image: finalImage,
+          audio: null, // Voice streaming can be added here
+          text: textContext,
+          mode: sessionMode,
+          sessionId: activeSessionRef.current.id
+        }
+      }));
+    } catch (err) {
+      console.error("DEBUG: Stream capture failed:", err);
+      setIsAnalyzing(false);
     }
+  }, [ws, textContext, sessionMode]);
 
-    ws.send(JSON.stringify({
-      type: "ANALYZE",
-      payload: {
-        image: imageSrc,
-        audio: audioBase64,
-        text: textContext,
-        mode: sessionMode
-      }
-    }));
-  }, [webcamRef, activeSession, ws, audioBlob, textContext, sessionMode]);
-
-  // Real-time analysis loop (every 10 seconds)
+  // Real-time analysis loop (High-frequency streaming: 1 frame per 2 seconds)
   useEffect(() => {
     let interval: NodeJS.Timeout;
     if (activeSession) {
-      // Initial capture
       capture();
-      interval = setInterval(capture, 10000);
+      interval = setInterval(capture, 2000);
     }
     return () => clearInterval(interval);
-  }, [activeSession, capture]);
+  }, [!!activeSession, capture]);
 
   const getSuggestion = (res: AnalysisResult) => {
     if (res.cognitiveState === 'Stressed') return SUGGESTIONS.Stressed;
@@ -453,31 +596,44 @@ export default function App() {
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-6 py-8 grid grid-cols-1 lg:grid-cols-12 gap-8">
-        
-        {/* Left: Webcam & Controls */}
-        <div className="lg:col-span-7 space-y-6">
-          <div className="relative group">
-            <div className="absolute -inset-1 bg-gradient-to-r from-indigo-500 to-purple-600 rounded-3xl blur opacity-20 group-hover:opacity-30 transition duration-1000"></div>
-            <div className="relative bg-zinc-900 rounded-2xl border border-zinc-800 overflow-hidden aspect-video shadow-2xl">
+      <main className="max-w-7xl mx-auto px-6 py-8">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+          {/* Left Column: Live Video & Control */}
+          <div className="lg:col-span-5 space-y-6">
+            <div className="relative aspect-video bg-black rounded-[2.5rem] overflow-hidden border border-zinc-800 shadow-2xl group">
               <Webcam
-                audio={false}
                 ref={webcamRef}
+                audio={false}
                 screenshotFormat="image/jpeg"
-                className="w-full h-full object-cover"
+                className="w-full h-full object-cover grayscale-[0.3] contrast-[1.1]"
                 videoConstraints={{ facingMode: "user" }}
                 mirrored={true}
                 imageSmoothing={true}
-                screenshotQuality={0.92}
                 disablePictureInPicture={true}
                 forceScreenshotSourceSize={true}
                 onUserMedia={() => {}}
                 onUserMediaError={() => {}}
+                screenshotQuality={0.92}
               />
               
+              {/* Face Tracking Box Simulation */}
+              {activeSession && temporalWindow.length > 0 && (
+                <motion.div 
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  className="absolute inset-0 pointer-events-none"
+                >
+                  <div className="absolute top-1/4 left-1/4 w-1/2 h-1/2 border-2 border-indigo-500/50 rounded-3xl shadow-[0_0_30px_rgba(99,102,241,0.3)]">
+                    <div className="absolute -top-10 left-0 bg-indigo-500 text-white text-[10px] font-bold px-3 py-1 rounded-full flex items-center gap-2">
+                      <User className="w-3 h-3" />
+                      ID: {user?.uid.slice(0, 8)}
+                    </div>
+                  </div>
+                </motion.div>
+              )}
+
               {/* Overlay UI */}
-              <div className="absolute inset-0 pointer-events-none flex flex-col justify-between p-6">
-                {/* Scanning Animation Overlay */}
+              <div className="absolute inset-0 p-6 flex flex-col justify-between pointer-events-none">
                 <AnimatePresence>
                   {isAnalyzing && (
                     <motion.div
@@ -500,14 +656,16 @@ export default function App() {
                       isAnalyzing ? "bg-indigo-400 animate-ping" : (activeSession ? "bg-red-500 animate-pulse" : "bg-zinc-500")
                     )}></div>
                     <span className="text-[10px] font-bold uppercase tracking-wider">
-                      {isAnalyzing ? "Analyzing..." : (activeSession ? `${activeSession.type.toUpperCase()} SESSION ACTIVE` : "Standby")}
+                      {isAnalyzing ? "Streaming..." : (activeSession ? "Live Session" : "Standby")}
                     </span>
                   </div>
-                  
-                  {activeSession?.type === 'wallet' && (
-                    <div className="bg-indigo-500/20 backdrop-blur-md border border-indigo-500/30 px-3 py-1.5 rounded-xl flex items-center gap-2">
-                      <Search className="w-3.5 h-3.5 text-indigo-400" />
-                      <span className="text-[10px] font-bold text-indigo-200">Object Detection Mode</span>
+
+                  {activeSession && (
+                    <div className="backdrop-blur-md px-3 py-1.5 rounded-full border border-white/10 bg-black/40 flex items-center gap-2">
+                      <Clock className="w-3 h-3 text-zinc-400" />
+                      <span className="text-[10px] font-mono font-bold text-zinc-300">
+                        {formatDuration(sessionDuration)}
+                      </span>
                     </div>
                   )}
                 </div>
@@ -519,270 +677,137 @@ export default function App() {
                       className="pointer-events-auto group/btn relative flex items-center gap-3 bg-white text-black px-10 py-5 rounded-2xl font-bold transition-all hover:scale-105 active:scale-95 shadow-[0_0_40px_rgba(255,255,255,0.2)] animate-pulse hover:animate-none"
                     >
                       <Brain className="w-6 h-6 fill-black" />
-                      Analyze {analysisMode === 'face' ? 'Face' : 'Wallet'}
+                      Start Analysis
                     </button>
                   ) : (
-                    <div className="flex gap-3 pointer-events-auto">
-                      <button
-                        onClick={capture}
-                        disabled={isAnalyzing}
-                        className="flex items-center gap-3 bg-white/10 backdrop-blur-md text-white px-8 py-4 rounded-2xl font-bold transition-all hover:bg-white/20 border border-white/20 disabled:opacity-50"
-                      >
-                        {isAnalyzing ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Activity className="w-5 h-5" />}
-                        {isAnalyzing ? "Analyzing..." : "Analyze Again"}
-                      </button>
-                      <button
-                        onClick={stopSession}
-                        className="flex items-center gap-3 bg-red-500/20 backdrop-blur-md text-red-400 px-6 py-4 rounded-2xl font-bold transition-all hover:bg-red-500/30 border border-red-500/30"
-                      >
-                        <Square className="w-5 h-5 fill-current" />
-                        End Session
-                      </button>
-                    </div>
+                    <button
+                      onClick={stopSession}
+                      className="pointer-events-auto flex items-center gap-3 bg-red-500/20 backdrop-blur-md text-red-400 px-8 py-4 rounded-2xl font-bold transition-all hover:bg-red-500/30 border border-red-500/30"
+                    >
+                      <Square className="w-5 h-5 fill-current" />
+                      End Session
+                    </button>
                   )}
                 </div>
               </div>
             </div>
-          </div>
 
-          {/* Session Trends Chart */}
-          {activeSession && activeSession.results.length > 1 && (
-            <motion.div 
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6"
-            >
-              <div className="flex items-center justify-between mb-6">
-                <div className="flex items-center gap-2">
-                  <TrendingUp className="w-4 h-4 text-indigo-400" />
-                  <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-400">Session Trends</h3>
-                </div>
-              </div>
-              <div className="h-[200px] w-full">
-                <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={chartData}>
-                    <defs>
-                      <linearGradient id="colorConf" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#6366f1" stopOpacity={0.3}/>
-                        <stop offset="95%" stopColor="#6366f1" stopOpacity={0}/>
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
-                    <XAxis 
-                      dataKey="time" 
-                      stroke="#52525b" 
-                      fontSize={10} 
-                      tickLine={false} 
-                      axisLine={false}
-                    />
-                    <YAxis 
-                      stroke="#52525b" 
-                      fontSize={10} 
-                      tickLine={false} 
-                      axisLine={false}
-                      domain={[0, 100]}
-                    />
-                    <Tooltip 
-                      contentStyle={{ backgroundColor: '#18181b', border: '1px solid #27272a', borderRadius: '12px' }}
-                      itemStyle={{ fontSize: '12px' }}
-                    />
-                    <Area 
-                      type="monotone" 
-                      dataKey="confidence" 
-                      stroke="#6366f1" 
-                      fillOpacity={1} 
-                      fill="url(#colorConf)" 
-                      strokeWidth={2}
-                    />
-                    <Area 
-                      type="monotone" 
-                      dataKey="engagement" 
-                      stroke="#a855f7" 
-                      fillOpacity={0}
-                      strokeWidth={2}
-                      strokeDasharray="5 5"
-                    />
-                  </AreaChart>
-                </ResponsiveContainer>
-              </div>
-            </motion.div>
-          )}
-
-          {/* Advanced Inputs */}
-          <div className="grid grid-cols-2 gap-6">
-            <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6">
-              <div className="flex items-center justify-between mb-4">
-                <div className="flex items-center gap-2">
-                  <Activity className="w-4 h-4 text-indigo-400" />
-                  <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-400">Voice Tone Capture</h3>
-                </div>
-                <button
-                  onClick={isRecording ? stopRecording : startRecording}
-                  className={cn(
-                    "px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2",
-                    isRecording ? "bg-red-500 text-white animate-pulse" : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700"
-                  )}
-                >
-                  {isRecording ? <Square className="w-3 h-3 fill-current" /> : <Play className="w-3 h-3 fill-current" />}
-                  {isRecording ? "Stop Recording" : "Start Recording"}
-                </button>
-              </div>
-              <p className="text-[10px] text-zinc-500">Multimodal AI fuses voice tone with facial cues for higher accuracy.</p>
-            </div>
-
-            <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6">
-              <div className="flex items-center gap-2 mb-4">
-                <Search className="w-4 h-4 text-indigo-400" />
-                <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-400">Contextual Input</h3>
-              </div>
-              <input 
-                type="text"
-                value={textContext}
-                onChange={(e) => setTextContext(e.target.value)}
-                placeholder="What are you working on?"
-                className="w-full bg-zinc-800/50 border border-zinc-700/50 rounded-xl py-3 px-4 text-sm text-white placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
-              />
-            </div>
-          </div>
-
-          {/* Ethics Disclaimer */}
-          <div className="p-4 bg-indigo-500/5 border border-indigo-500/10 rounded-2xl flex gap-4 items-start">
-            <AlertCircle className="w-5 h-5 text-indigo-400 shrink-0 mt-0.5" />
-            <p className="text-sm text-zinc-400 leading-relaxed">
-              <strong className="text-zinc-200">Ethical Notice:</strong> This system uses computer vision to predict emotional and behavioral cues. It does not access private thoughts. Wallet detection is for demonstration purposes.
-            </p>
-          </div>
-        </div>
-
-        {/* Right: Analytics */}
-        <div className="lg:col-span-5 space-y-6">
-          <AnimatePresence mode="wait">
-            {currentResult ? (
-              <motion.div
-                key="results"
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -20 }}
-                className="space-y-6"
-              >
-                {/* Main Stats */}
-                <div className="grid grid-cols-2 gap-4">
-                  <StatCard 
-                    label="Primary Emotion" 
-                    value={currentResult.emotion} 
-                    subValue={`${currentResult.confidence}% Confidence`}
-                    icon={<Activity className="w-5 h-5 text-indigo-400" />}
-                  />
-                  <StatCard 
-                    label="Attention Score" 
-                    value={`${currentResult.attentionScore || 0}%`} 
-                    subValue={`Gaze: ${currentResult.gazeDirection || 'Center'}`}
-                    icon={<Eye className="w-5 h-5 text-purple-400" />}
-                  />
-                </div>
-
-                {/* Stress & Focus Dashboard */}
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6">
-                    <h3 className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-4">Stress Intensity</h3>
-                    <div className="flex items-end gap-3">
-                      <span className="text-3xl font-bold text-white">{currentResult.stressLevel || 0}%</span>
-                      <div className="w-full h-2 bg-zinc-800 rounded-full overflow-hidden mb-2">
-                        <motion.div 
-                          initial={{ width: 0 }}
-                          animate={{ width: `${currentResult.stressLevel || 0}%` }}
-                          className={cn(
-                            "h-full transition-all duration-1000",
-                            (currentResult.stressLevel || 0) > 70 ? "bg-red-500" : (currentResult.stressLevel || 0) > 40 ? "bg-yellow-500" : "bg-green-500"
-                          )}
-                        />
-                      </div>
-                    </div>
-                  </div>
-                  <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6">
-                    <h3 className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-4">Cognitive State</h3>
-                    <span className="text-2xl font-bold text-white tracking-tight">{currentResult.cognitiveState}</span>
-                    <p className="text-[10px] text-zinc-500 mt-1">Inferred from fusion</p>
-                  </div>
-                </div>
-
-                {/* AI Insight Generator */}
-                <motion.div 
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="bg-indigo-500/10 border border-indigo-500/20 rounded-3xl p-6"
-                >
-                  <div className="flex items-center gap-3 mb-3">
-                    <div className="p-2 bg-indigo-500/20 rounded-lg">
-                      <Brain className="w-5 h-5 text-indigo-400" />
-                    </div>
-                    <h3 className="font-bold text-indigo-100">AI Insight Engine</h3>
-                  </div>
-                  <p className="text-indigo-200/80 text-sm leading-relaxed italic">
-                    "{currentResult.fusedInsight || "Analyzing multimodal signals to generate contextual insights..."}"
-                  </p>
-                </motion.div>
-
-                {/* Analysis Steps (Visible during analysis) */}
-                {isAnalyzing && (
-                  <motion.div 
-                    initial={{ opacity: 0, scale: 0.95 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    className="bg-indigo-500/10 border border-indigo-500/20 rounded-3xl p-6"
-                  >
-                    <h3 className="text-xs font-bold uppercase tracking-wider text-indigo-400 mb-4">AI Processing Pipeline</h3>
-                    <div className="space-y-3">
-                      <div className="flex items-center gap-3">
-                        <div className="w-4 h-4 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />
-                        <span className="text-sm text-zinc-300">Extracting facial landmarks...</span>
-                      </div>
-                      <div className="flex items-center gap-3 opacity-50">
-                        <div className="w-4 h-4 rounded-full bg-zinc-800" />
-                        <span className="text-sm text-zinc-500">Classifying micro-expressions...</span>
-                      </div>
-                      <div className="flex items-center gap-3 opacity-50">
-                        <div className="w-4 h-4 rounded-full bg-zinc-800" />
-                        <span className="text-sm text-zinc-500">Inferring cognitive load...</span>
-                      </div>
-                    </div>
-                  </motion.div>
-                )}
-
-                {/* Wallet Items (Conditional) */}
-                {currentResult.walletItems && currentResult.walletItems.length > 0 && (
-                  <motion.div 
-                    initial={{ opacity: 0, x: 20 }}
+            {/* Notifications Panel */}
+            <div className="space-y-3">
+              <AnimatePresence>
+                {notifications.map(n => (
+                  <motion.div
+                    key={n.id}
+                    initial={{ opacity: 0, x: -20 }}
                     animate={{ opacity: 1, x: 0 }}
-                    className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6"
+                    exit={{ opacity: 0, x: -20 }}
+                    className={cn(
+                      "p-4 rounded-2xl border flex items-center gap-3 shadow-xl",
+                      n.type === 'warning' ? "bg-red-500/10 border-red-500/20 text-red-400" : "bg-indigo-500/10 border-indigo-500/20 text-indigo-400"
+                    )}
                   >
-                    <div className="flex items-center gap-2 mb-4">
-                      <Wallet className="w-4 h-4 text-indigo-400" />
-                      <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-400">Predicted Wallet Items</h3>
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      {currentResult.walletItems.map((item, i) => (
-                        <span key={i} className="px-3 py-1.5 bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-xs font-bold rounded-lg">
-                          {item}
-                        </span>
-                      ))}
-                    </div>
+                    <AlertCircle className="w-5 h-5" />
+                    <span className="text-sm font-bold">{n.text}</span>
                   </motion.div>
-                )}
-              </motion.div>
+                ))}
+              </AnimatePresence>
+            </div>
+          </div>
+
+          {/* Right Column: Advanced Analytics */}
+          <div className="lg:col-span-7 space-y-6">
+            {activeSession ? (
+              <>
+                {/* Real-time Gauges */}
+                <div className="grid grid-cols-3 gap-6 bg-zinc-900/50 border border-zinc-800 p-8 rounded-[2.5rem]">
+                  <Gauge 
+                    value={temporalWindow.length > 0 ? temporalWindow[temporalWindow.length-1].attentionScore || 0 : 0} 
+                    label="Attention" 
+                    color="#6366f1" 
+                  />
+                  <Gauge 
+                    value={temporalWindow.length > 0 ? temporalWindow[temporalWindow.length-1].stressLevel || 0 : 0} 
+                    label="Stress" 
+                    color="#f43f5e" 
+                  />
+                  <Gauge 
+                    value={temporalWindow.length > 0 ? temporalWindow[temporalWindow.length-1].confidence : 0} 
+                    label="Confidence" 
+                    color="#a855f7" 
+                  />
+                </div>
+
+                {/* Trends & XAI Panel */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="bg-zinc-900/50 border border-zinc-800 p-6 rounded-[2rem] space-y-4">
+                    <div className="flex items-center gap-2">
+                      <TrendingUp className="w-4 h-4 text-indigo-400" />
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-400">Temporal Trends</h3>
+                    </div>
+                    <div className="space-y-3">
+                      <div className="flex justify-between items-center p-3 bg-zinc-800/30 rounded-xl border border-zinc-800">
+                        <span className="text-[11px] font-bold text-zinc-500 uppercase">Stress Trend</span>
+                        <span className={cn(
+                          "text-xs font-bold px-2 py-0.5 rounded",
+                          trends.stress === 'Increasing Rapidly' ? "bg-red-500/20 text-red-400" : "bg-zinc-800 text-zinc-400"
+                        )}>{trends.stress}</span>
+                      </div>
+                      <div className="flex justify-between items-center p-3 bg-zinc-800/30 rounded-xl border border-zinc-800">
+                        <span className="text-[11px] font-bold text-zinc-500 uppercase">Focus Trend</span>
+                        <span className={cn(
+                          "text-xs font-bold px-2 py-0.5 rounded",
+                          trends.focus === 'Improving' ? "bg-green-500/20 text-green-400" : "bg-zinc-800 text-zinc-400"
+                        )}>{trends.focus}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {temporalWindow.length > 0 && (
+                    <InsightCard result={temporalWindow[temporalWindow.length-1]} />
+                  )}
+                </div>
+
+                {/* Timeline Graph */}
+                <div className="bg-zinc-900/50 border border-zinc-800 p-8 rounded-[2.5rem]">
+                  <div className="flex items-center justify-between mb-6">
+                    <div className="flex items-center gap-2">
+                      <Activity className="w-4 h-4 text-indigo-400" />
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-400">Live Cognitive Stream</h3>
+                    </div>
+                  </div>
+                  <div className="h-[250px] w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <AreaChart data={chartData}>
+                        <defs>
+                          <linearGradient id="colorConf" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor="#6366f1" stopOpacity={0.3}/>
+                            <stop offset="95%" stopColor="#6366f1" stopOpacity={0}/>
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+                        <XAxis dataKey="time" stroke="#52525b" fontSize={10} tickLine={false} axisLine={false} />
+                        <YAxis stroke="#52525b" fontSize={10} tickLine={false} axisLine={false} domain={[0, 100]} />
+                        <Tooltip 
+                          contentStyle={{ backgroundColor: '#18181b', border: '1px solid #27272a', borderRadius: '12px' }}
+                          itemStyle={{ fontSize: '12px' }}
+                        />
+                        <Area type="monotone" dataKey="confidence" stroke="#6366f1" fillOpacity={1} fill="url(#colorConf)" strokeWidth={3} />
+                        <Area type="monotone" dataKey="engagement" stroke="#a855f7" fillOpacity={0} strokeWidth={2} strokeDasharray="5 5" />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+              </>
             ) : (
-              <div className="h-[300px] flex flex-col items-center justify-center text-center p-8 bg-zinc-900/50 border border-dashed border-zinc-800 rounded-3xl">
-                <div className="w-16 h-16 bg-zinc-800 rounded-full flex items-center justify-center mb-4">
-                  <Camera className="w-8 h-8 text-zinc-600" />
+              <div className="h-full flex flex-col items-center justify-center text-center p-12 bg-zinc-900/30 border border-dashed border-zinc-800 rounded-[2.5rem]">
+                <div className="w-20 h-20 bg-zinc-800 rounded-full flex items-center justify-center mb-6">
+                  <Activity className="w-10 h-10 text-zinc-600" />
                 </div>
-                <h3 className="text-lg font-medium text-zinc-300">Ready for {analysisMode === 'face' ? 'Face' : 'Wallet'} Session</h3>
-                <p className="text-sm text-zinc-500 mt-2">Start a session to begin real-time cloud-synced monitoring.</p>
-                <div className="mt-6 px-4 py-2 bg-indigo-500/10 border border-indigo-500/20 rounded-xl flex items-center gap-2">
-                  <div className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse" />
-                  <span className="text-[10px] font-bold text-indigo-400 uppercase tracking-widest">System Online • Waiting for Trigger</span>
-                </div>
+                <h3 className="text-xl font-bold text-zinc-300">Awaiting Stream</h3>
+                <p className="text-zinc-500 mt-2 max-w-xs">Start a session to begin real-time cognitive analysis and temporal trend detection.</p>
               </div>
             )}
-          </AnimatePresence>
+          </div>
         </div>
       </main>
 

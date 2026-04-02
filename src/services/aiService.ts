@@ -1,10 +1,19 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { AnalysisResult, SessionMode } from "../types";
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
+const getApiKey = () => {
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) {
+    console.warn("GEMINI_API_KEY is not defined in the environment. Please configure it in the Secrets panel.");
+    return "";
+  }
+  return key;
+};
+
+const ai = new GoogleGenAI({ apiKey: getApiKey() });
 
 export async function analyzeFace(base64Image: string): Promise<AnalysisResult> {
-  const model = "gemini-3.1-flash-lite-preview";
+  const model = "gemini-3-flash-preview";
   
   const systemInstruction = `You are a world-class expert in micro-expression analysis, facial action coding (FACS), and cognitive behavioral science. 
   Your task is to analyze a facial image and provide a highly accurate, nuanced inference of the person's emotional and cognitive state.
@@ -54,6 +63,8 @@ export async function analyzeFace(base64Image: string): Promise<AnalysisResult> 
         responseSchema: {
           type: Type.OBJECT,
           properties: {
+            status: { type: Type.STRING, enum: ['success', 'error'] },
+            message: { type: Type.STRING },
             emotion: { 
               type: Type.STRING,
               description: "The primary detected emotion from the expanded list."
@@ -71,19 +82,28 @@ export async function analyzeFace(base64Image: string): Promise<AnalysisResult> 
               description: "Inferred cognitive state: 'Thinking', 'Confused', 'Stressed', 'Relaxed', 'Curious', or 'Determined'."
             },
           },
-          required: ["emotion", "confidence", "engagement", "cognitiveState"],
+          required: ["status", "emotion", "confidence", "engagement", "cognitiveState"],
         },
       },
     });
 
     const result = JSON.parse(response.text || "{}");
     return {
+      status: 'success',
       ...result,
       timestamp: Date.now(),
     };
   } catch (error) {
     console.error("Face analysis failed:", error);
-    throw error;
+    return {
+      status: 'error',
+      message: error instanceof Error ? error.message : "Face analysis failed",
+      emotion: 'Neutral',
+      confidence: 0,
+      engagement: 'Distracted',
+      cognitiveState: 'Stressed',
+      timestamp: Date.now(),
+    } as any;
   }
 }
 
@@ -93,7 +113,7 @@ export async function analyzeMultimodal(
   textContext?: string,
   mode: SessionMode = 'Standard'
 ): Promise<AnalysisResult> {
-  const model = "gemini-3.1-flash-lite-preview";
+  const model = "gemini-3-flash-preview";
   
   const systemInstruction = `You are a top 1% AI systems architect and cognitive scientist. 
   Your task is to perform multimodal fusion of facial cues, voice tone, and optional text context.
@@ -133,43 +153,84 @@ export async function analyzeMultimodal(
   }
 
   try {
-    const response = await ai.models.generateContent({
-      model,
-      contents,
-      config: {
-        systemInstruction,
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            emotion: { type: Type.STRING },
-            confidence: { type: Type.NUMBER },
-            engagement: { type: Type.STRING },
-            cognitiveState: { type: Type.STRING },
-            gazeDirection: { type: Type.STRING, enum: ['Center', 'Left', 'Right', 'Up', 'Down'] },
-            attentionScore: { type: Type.NUMBER },
-            voiceTone: { type: Type.STRING },
-            fusedInsight: { type: Type.STRING },
-            stressLevel: { type: Type.NUMBER }
+    console.log("DEBUG: Calling Gemini API for multimodal analysis");
+    
+    // Simple retry logic for transient network errors
+    let attempt = 0;
+    let response;
+    while (attempt < 2) {
+      try {
+        response = await ai.models.generateContent({
+          model,
+          contents,
+          config: {
+            systemInstruction,
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                status: { type: Type.STRING, enum: ['success', 'error'] },
+                message: { type: Type.STRING },
+                emotion: { type: Type.STRING },
+                confidence: { type: Type.NUMBER },
+                engagement: { type: Type.STRING },
+                cognitiveState: { type: Type.STRING },
+                gazeDirection: { type: Type.STRING, enum: ['Center', 'Left', 'Right', 'Up', 'Down'] },
+                attentionScore: { type: Type.NUMBER },
+                voiceTone: { type: Type.STRING },
+                fusedInsight: { type: Type.STRING },
+                stressLevel: { type: Type.NUMBER },
+                visualCues: { 
+                  type: Type.ARRAY, 
+                  items: { type: Type.STRING },
+                  description: "Specific visual features detected (e.g., 'Frown', 'Narrowed eyes', 'Jaw tension')."
+                },
+                reasoning: { 
+                  type: Type.STRING,
+                  description: "Explainable AI (XAI) rationale for the prediction."
+                }
+              },
+              required: ["status", "emotion", "confidence", "engagement", "cognitiveState", "gazeDirection", "attentionScore", "stressLevel", "visualCues", "reasoning"],
+            },
           },
-          required: ["emotion", "confidence", "engagement", "cognitiveState", "gazeDirection", "attentionScore", "stressLevel"],
-        },
-      },
-    });
+        });
+        break; // Success!
+      } catch (e) {
+        attempt++;
+        if (attempt >= 2) throw e;
+        console.warn(`DEBUG: Gemini API attempt ${attempt} failed, retrying...`, e);
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
 
+    if (!response) throw new Error("No response from Gemini API");
+
+    console.log("DEBUG: Gemini API response received");
     const result = JSON.parse(response.text || "{}");
     return {
+      status: 'success',
       ...result,
       timestamp: Date.now(),
     };
   } catch (error) {
-    console.error("Multimodal analysis failed:", error);
-    throw error;
+    console.error("DEBUG: Multimodal analysis failed:", error);
+    return {
+      status: 'error',
+      message: error instanceof Error ? error.message : "No face detected or analysis failed",
+      emotion: 'Neutral',
+      confidence: 0,
+      engagement: 'Distracted',
+      cognitiveState: 'Stressed',
+      gazeDirection: 'Center',
+      attentionScore: 0,
+      stressLevel: 0,
+      timestamp: Date.now(),
+    } as any;
   }
 }
 
 export async function analyzeWallet(base64Image: string): Promise<AnalysisResult> {
-  const model = "gemini-3.1-flash-lite-preview";
+  const model = "gemini-3-flash-preview";
   
   const systemInstruction = `You are an expert in object detection and financial security. 
   Your task is to analyze an image of a wallet (open or closed) and predict the items inside or visible.
@@ -211,6 +272,8 @@ export async function analyzeWallet(base64Image: string): Promise<AnalysisResult
         responseSchema: {
           type: Type.OBJECT,
           properties: {
+            status: { type: Type.STRING, enum: ['success', 'error'] },
+            message: { type: Type.STRING },
             emotion: { 
               type: Type.STRING,
               description: "Inferred emotion of the owner (e.g., 'Contentment' for organized, 'Anxiety' for empty/messy)."
@@ -233,18 +296,28 @@ export async function analyzeWallet(base64Image: string): Promise<AnalysisResult
               description: "List of items detected in the wallet."
             }
           },
-          required: ["emotion", "confidence", "engagement", "cognitiveState", "walletItems"],
+          required: ["status", "emotion", "confidence", "engagement", "cognitiveState", "walletItems"],
         },
       },
     });
 
     const result = JSON.parse(response.text || "{}");
     return {
+      status: 'success',
       ...result,
       timestamp: Date.now(),
     };
   } catch (error) {
     console.error("Wallet analysis failed:", error);
-    throw error;
+    return {
+      status: 'error',
+      message: error instanceof Error ? error.message : "Wallet analysis failed",
+      emotion: 'Neutral',
+      confidence: 0,
+      engagement: 'Focused',
+      cognitiveState: 'Stressed',
+      walletItems: [],
+      timestamp: Date.now(),
+    } as any;
   }
 }

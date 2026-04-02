@@ -7,6 +7,8 @@ export type Emotion =
 export type SessionMode = 'Student' | 'Interview' | 'Agriculture' | 'Standard';
 
 export interface AnalysisResult {
+  status?: 'success' | 'error';
+  message?: string;
   emotion: Emotion;
   confidence: number;
   engagement: 'Focused' | 'Distracted' | 'Highly Engaged';
@@ -19,6 +21,10 @@ export interface AnalysisResult {
   voiceTone?: string;
   fusedInsight?: string;
   stressLevel?: number; // 0-100
+  // XAI & Reasoning
+  visualCues?: string[]; // e.g., ["Frown", "Narrowed eyes"]
+  reasoning?: string;    // e.g., "Detected frown + low eye openness → predicted stress"
+  trend?: string;        // e.g., "Stress increasing"
 }
 
 export interface UserBaseline {
