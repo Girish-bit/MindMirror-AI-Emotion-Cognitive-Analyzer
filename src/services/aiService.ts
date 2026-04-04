@@ -1,45 +1,35 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { AnalysisResult, SessionMode } from "../types";
 
-const getApiKey = () => {
+const getAI = () => {
   const key = process.env.GEMINI_API_KEY;
   if (!key) {
-    console.warn("GEMINI_API_KEY is not defined in the environment. Please configure it in the Secrets panel.");
-    return "";
+    throw new Error("GEMINI_API_KEY is not defined. Please configure it in the Secrets panel.");
   }
-  return key;
+  return new GoogleGenAI({ apiKey: key });
 };
 
-const ai = new GoogleGenAI({ apiKey: getApiKey() });
-
 export async function analyzeFace(base64Image: string): Promise<AnalysisResult> {
+  const ai = getAI();
   const model = "gemini-3-flash-preview";
   
   const systemInstruction = `You are a world-class expert in micro-expression analysis, facial action coding (FACS), and cognitive behavioral science. 
   Your task is to analyze a facial image and provide a highly accurate, nuanced inference of the person's emotional and cognitive state.
 
-  EMOTION CATEGORIES (Select the most accurate):
+  ADVANCED METRICS:
+  - Focus Score (0-100): Proprietary metric based on eye gaze, posture, and stability.
+  - BPM Estimate (60-120): Estimated heart rate based on facial flushing, tension, and breathing rhythm.
+  - AI Coach Advice: A short, professional coaching intervention (e.g., "Deep breath", "Adjust posture").
+  - Environmental Context: Briefly explain the environment's impact (e.g., "Low lighting").
+  - XP Earned (5-25): Points based on focus quality.
+
+  EMOTION CATEGORIES:
   - Primary: Happy, Sad, Angry, Surprised, Neutral, Fear, Disgust.
   - Nuanced: Contempt, Boredom, Interest, Confusion, Anxiety, Pride, Shame, Guilt, Awe, Contentment, Amusement, Relief, Embarrassment, Excitement, Frustration, Curiosity, Determination.
+  
+  Return ONLY a valid JSON object.`;
 
-  CRITICAL GUIDELINES:
-  - Emotion: Identify the dominant emotion from the list above. Look for micro-expressions (e.g., lip corner tightening for Contempt, pupil dilation for Interest).
-  - Confidence: Provide a realistic confidence score (0-100) based on the clarity of facial features and intensity of the expression.
-  - Engagement: Infer based on gaze direction, head tilt, and muscle tension.
-    - 'Highly Engaged': Intense focus, forward lean, direct gaze, minimal blinking.
-    - 'Focused': Steady attention, neutral posture, consistent gaze.
-    - 'Distracted': Gaze aversion, relaxed or slumped posture, frequent blinking.
-  - Cognitive State:
-    - 'Thinking': Brow furrowed slightly, eyes narrowed or looking away, hand-to-face contact.
-    - 'Confused': Asymmetrical brow, tilted head, lip biting.
-    - 'Stressed': Tightened jaw, flared nostrils, visible tension in neck/forehead.
-    - 'Relaxed': Smooth facial features, open posture, soft gaze.
-    - 'Determined': Firm jaw, steady gaze, slight brow furrow.
-    - 'Curious': Tilted head, raised eyebrows, slight smile.
-    
-  Return ONLY a valid JSON object. Do not include any markdown formatting or explanations.`;
-
-  const prompt = "Perform a deep analysis of the facial cues in this image. Identify the primary emotion from the expanded list and infer the cognitive and engagement states with high precision.";
+  const prompt = "Perform a deep analysis of the facial cues and environment. Identify the primary emotion and infer advanced cognitive metrics with high precision.";
 
   try {
     const response = await ai.models.generateContent({
@@ -81,8 +71,18 @@ export async function analyzeFace(base64Image: string): Promise<AnalysisResult> 
               type: Type.STRING,
               description: "Inferred cognitive state: 'Thinking', 'Confused', 'Stressed', 'Relaxed', 'Curious', or 'Determined'."
             },
+            focusScore: { type: Type.NUMBER },
+            bpmEstimate: { type: Type.NUMBER },
+            aiCoachAdvice: { type: Type.STRING },
+            environmentalContext: { type: Type.STRING },
+            xpEarned: { type: Type.NUMBER },
+            visualCues: { 
+              type: Type.ARRAY, 
+              items: { type: Type.STRING }
+            },
+            reasoning: { type: Type.STRING },
           },
-          required: ["status", "emotion", "confidence", "engagement", "cognitiveState"],
+          required: ["status", "emotion", "confidence", "engagement", "cognitiveState", "focusScore", "bpmEstimate", "aiCoachAdvice", "xpEarned"],
         },
       },
     });
@@ -113,6 +113,7 @@ export async function analyzeMultimodal(
   textContext?: string,
   mode: SessionMode = 'Standard'
 ): Promise<AnalysisResult> {
+  const ai = getAI();
   const model = "gemini-3-flash-preview";
   
   const systemInstruction = `You are a top 1% AI systems architect and cognitive scientist. 
@@ -120,6 +121,13 @@ export async function analyzeMultimodal(
   
   MODE: ${mode}
   
+  ADVANCED METRICS:
+  - Focus Score (0-100): Proprietary metric based on eye gaze, posture, and stability.
+  - BPM Estimate (60-120): Estimated heart rate based on facial flushing, tension, and breathing rhythm.
+  - AI Coach Advice: A short, professional coaching intervention.
+  - Environmental Context: Briefly explain the environment's impact.
+  - XP Earned (5-25): Points based on focus quality.
+
   ANALYSIS REQUIREMENTS:
   1. Face: Identify emotion, engagement, cognitive state, and GAZE direction.
   2. Voice (if provided): Identify tone, pitch, and emotional resonance.
@@ -188,9 +196,14 @@ export async function analyzeMultimodal(
                 reasoning: { 
                   type: Type.STRING,
                   description: "Explainable AI (XAI) rationale for the prediction."
-                }
+                },
+                focusScore: { type: Type.NUMBER },
+                bpmEstimate: { type: Type.NUMBER },
+                aiCoachAdvice: { type: Type.STRING },
+                environmentalContext: { type: Type.STRING },
+                xpEarned: { type: Type.NUMBER },
               },
-              required: ["status", "emotion", "confidence", "engagement", "cognitiveState", "gazeDirection", "attentionScore", "stressLevel", "visualCues", "reasoning"],
+              required: ["status", "emotion", "confidence", "engagement", "cognitiveState", "gazeDirection", "attentionScore", "stressLevel", "visualCues", "reasoning", "focusScore", "bpmEstimate", "aiCoachAdvice", "xpEarned"],
             },
           },
         });
@@ -230,6 +243,7 @@ export async function analyzeMultimodal(
 }
 
 export async function analyzeWallet(base64Image: string): Promise<AnalysisResult> {
+  const ai = getAI();
   const model = "gemini-3-flash-preview";
   
   const systemInstruction = `You are an expert in object detection and financial security. 

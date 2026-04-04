@@ -1,9 +1,9 @@
 import express from "express";
+import "dotenv/config";
 import { createServer as createHttpServer } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import path from "path";
 import { createServer as createViteServer } from "vite";
-import { analyzeMultimodal } from "./src/services/aiService";
 
 async function startServer() {
   const app = express();
@@ -13,36 +13,9 @@ async function startServer() {
 
   app.use(express.json({ limit: '50mb' }));
 
-  // WebSocket Connection for Real-Time Streaming
+  // WebSocket Connection for Real-Time Streaming (Optional for other features)
   wss.on("connection", (ws: WebSocket) => {
-    console.log("DEBUG: High-performance stream established");
-
-    ws.on("message", async (message: string) => {
-      try {
-        const data = JSON.parse(message);
-        
-        if (data.type === "STREAM_FRAME") {
-          const { image, audio, text, mode, sessionId } = data.payload;
-          
-          // Process frame with Gemini
-          const result = await analyzeMultimodal(image, audio, text, mode);
-          
-          // Send back to client with original timestamp for latency tracking
-          ws.send(JSON.stringify({ 
-            type: "STREAM_RESULT", 
-            payload: result,
-            timestamp: data.timestamp 
-          }));
-        }
-      } catch (error) {
-        console.error("DEBUG: Stream processing error:", error);
-        ws.send(JSON.stringify({ 
-          type: "STREAM_ERROR", 
-          message: error instanceof Error ? error.message : "Stream processing failed" 
-        }));
-      }
-    });
-
+    console.log("DEBUG: Real-time connection established");
     ws.on("close", () => console.log("DEBUG: Stream disconnected"));
   });
 

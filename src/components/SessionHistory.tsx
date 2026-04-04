@@ -86,10 +86,13 @@ export default function SessionHistory({ sessions, onClose }: SessionHistoryProp
         startY: 50,
         head: [['Metric', 'Value']],
         body: [
+          ['Session Grade', session.sessionGrade || 'N/A'],
+          ['Total XP Earned', session.totalXp?.toString() || '0'],
           ['Top Emotion', session.metrics.topEmotion],
+          ['Average Focus Score', `${session.metrics.averageFocusScore}%`],
+          ['Peak Focus Score', `${session.metrics.peakFocusScore}%`],
           ['Average Confidence', `${session.metrics.averageConfidence}%`],
           ['Total Samples', session.results.length.toString()],
-          ['Analysis Type', session.type.toUpperCase()],
         ],
         theme: 'striped',
         headStyles: { fillColor: [99, 102, 241] },
@@ -101,15 +104,15 @@ export default function SessionHistory({ sessions, onClose }: SessionHistoryProp
       index + 1,
       new Date(r.timestamp).toLocaleTimeString(),
       r.emotion,
-      `${r.confidence}%`,
-      r.engagement,
+      `${r.focusScore}%`,
+      `${r.bpmEstimate || '--'}`,
       r.cognitiveState,
-      r.walletItems ? r.walletItems.join(', ') : 'N/A'
+      r.aiCoachAdvice || 'N/A'
     ]);
 
     autoTable(doc, {
       startY: (doc as any).lastAutoTable.finalY + 15,
-      head: [['#', 'Time', 'Emotion', 'Confidence', 'Engagement', 'Cognitive State', 'Objects']],
+      head: [['#', 'Time', 'Emotion', 'Focus', 'BPM', 'State', 'AI Advice']],
       body: tableData,
       theme: 'grid',
       headStyles: { fillColor: [79, 70, 229] }, // Indigo-600
@@ -178,8 +181,8 @@ export default function SessionHistory({ sessions, onClose }: SessionHistoryProp
               <History className="w-6 h-6 text-indigo-400" />
             </div>
             <div>
-              <h2 className="text-xl font-bold text-white">Session History</h2>
-              <p className="text-xs text-zinc-500 font-medium uppercase tracking-widest">Cloud-synced analytics & logs</p>
+              <h2 className="text-xl font-bold text-white">Latest Session</h2>
+              <p className="text-xs text-zinc-500 font-medium uppercase tracking-widest">Most recent cloud-synced analysis</p>
             </div>
           </div>
           <div className="flex items-center gap-3">
@@ -205,30 +208,8 @@ export default function SessionHistory({ sessions, onClose }: SessionHistoryProp
         <div className="flex-1 overflow-y-auto p-6 space-y-8">
           {sessions.length > 0 ? (
             <>
-              {/* Global Summary Analytics */}
-              {globalMetrics && (
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                  <div className="bg-zinc-800/30 border border-zinc-800 p-5 rounded-2xl">
-                    <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-2">Total Sessions</p>
-                    <p className="text-2xl font-bold text-white">{globalMetrics.totalSessions}</p>
-                  </div>
-                  <div className="bg-zinc-800/30 border border-zinc-800 p-5 rounded-2xl">
-                    <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-2">Overall Top Emotion</p>
-                    <p className="text-2xl font-bold text-indigo-400">{globalMetrics.topEmotion}</p>
-                  </div>
-                  <div className="bg-zinc-800/30 border border-zinc-800 p-5 rounded-2xl">
-                    <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-2">Avg. Confidence</p>
-                    <p className="text-2xl font-bold text-purple-400">{globalMetrics.avgConfidence}%</p>
-                  </div>
-                  <div className="bg-zinc-800/30 border border-zinc-800 p-5 rounded-2xl">
-                    <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-2">Total Samples</p>
-                    <p className="text-2xl font-bold text-zinc-300">{globalMetrics.totalSamples}</p>
-                  </div>
-                </div>
-              )}
-
               <div className="space-y-4">
-                <h3 className="text-xs font-bold text-zinc-500 uppercase tracking-widest px-2">Recent Sessions</h3>
+                <h3 className="text-xs font-bold text-zinc-500 uppercase tracking-widest px-2">Most Recent Analysis</h3>
                 {sessions.map((session) => (
                   <motion.div 
                     key={session.id}
@@ -268,15 +249,19 @@ export default function SessionHistory({ sessions, onClose }: SessionHistoryProp
 
                       <div className="flex items-center gap-3">
                         {session.metrics && (
-                          <div className="flex items-center gap-3 mr-4">
+                          <div className="flex items-center gap-4 mr-4">
+                            <div className="flex flex-col items-center justify-center w-12 h-12 bg-indigo-500/10 rounded-full border border-indigo-500/20">
+                              <span className="text-xs font-bold text-zinc-500 uppercase leading-none mb-1">Grade</span>
+                              <span className="text-lg font-black text-indigo-400 leading-none">{session.sessionGrade || 'C'}</span>
+                            </div>
                             <div className="text-right">
-                              <p className="text-[9px] font-bold text-zinc-500 uppercase tracking-wider">Top Emotion</p>
-                              <p className="text-sm font-bold text-indigo-300">{session.metrics.topEmotion}</p>
+                              <p className="text-[9px] font-bold text-zinc-500 uppercase tracking-wider">Focus Score</p>
+                              <p className="text-sm font-bold text-indigo-300">{session.metrics.averageFocusScore}%</p>
                             </div>
                             <div className="w-px h-8 bg-zinc-800"></div>
                             <div className="text-right">
-                              <p className="text-[9px] font-bold text-zinc-500 uppercase tracking-wider">Avg. Conf</p>
-                              <p className="text-sm font-bold text-purple-300">{session.metrics.averageConfidence}%</p>
+                              <p className="text-[9px] font-bold text-zinc-500 uppercase tracking-wider">XP Earned</p>
+                              <p className="text-sm font-bold text-green-400">+{session.totalXp || 0}</p>
                             </div>
                           </div>
                         )}
@@ -307,64 +292,61 @@ export default function SessionHistory({ sessions, onClose }: SessionHistoryProp
                           className="border-t border-zinc-800 bg-zinc-900/30"
                         >
                           <div className="p-6 grid grid-cols-1 lg:grid-cols-2 gap-8">
-                            {/* Emotion Distribution */}
-                            <div className="space-y-4">
-                              <div className="flex items-center gap-2">
-                                <PieChartIcon className="w-4 h-4 text-indigo-400" />
-                                <h4 className="text-xs font-bold uppercase tracking-wider text-zinc-400">Emotion Distribution</h4>
-                              </div>
-                              <div className="h-[200px] w-full">
-                                <ResponsiveContainer width="100%" height="100%">
-                                  <PieChart>
-                                    <Pie
-                                      data={Object.entries(session.metrics?.engagementDistribution || {}).map(([name, value]) => ({ name, value }))}
-                                      cx="50%"
-                                      cy="50%"
-                                      innerRadius={60}
-                                      outerRadius={80}
-                                      paddingAngle={5}
-                                      dataKey="value"
-                                    >
-                                      {Object.entries(session.metrics?.engagementDistribution || {}).map((_, index) => (
-                                        <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                                      ))}
-                                    </Pie>
-                                    <RechartsTooltip 
-                                      contentStyle={{ backgroundColor: '#18181b', border: '1px solid #27272a', borderRadius: '12px' }}
-                                      itemStyle={{ fontSize: '12px', color: '#fff' }}
-                                    />
-                                  </PieChart>
-                                </ResponsiveContainer>
-                              </div>
-                            </div>
+                             {/* Focus Score Over Time */}
+                             <div className="space-y-4">
+                               <div className="flex items-center gap-2">
+                                 <Activity className="w-4 h-4 text-indigo-400" />
+                                 <h4 className="text-xs font-bold uppercase tracking-wider text-zinc-400">Focus Performance Trend</h4>
+                               </div>
+                               <div className="h-[200px] w-full">
+                                 <ResponsiveContainer width="100%" height="100%">
+                                   <AreaChart data={session.results.map(r => ({ time: new Date(r.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), focus: r.focusScore }))}>
+                                     <defs>
+                                       <linearGradient id="colorFocusHist" x1="0" y1="0" x2="0" y2="1">
+                                         <stop offset="5%" stopColor="#6366f1" stopOpacity={0.3}/>
+                                         <stop offset="95%" stopColor="#6366f1" stopOpacity={0}/>
+                                       </linearGradient>
+                                     </defs>
+                                     <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+                                     <XAxis dataKey="time" stroke="#52525b" fontSize={10} tickLine={false} axisLine={false} />
+                                     <YAxis stroke="#52525b" fontSize={10} tickLine={false} axisLine={false} domain={[0, 100]} />
+                                     <RechartsTooltip 
+                                       contentStyle={{ backgroundColor: '#18181b', border: '1px solid #27272a', borderRadius: '12px' }}
+                                       itemStyle={{ fontSize: '12px', color: '#fff' }}
+                                     />
+                                     <Area type="monotone" dataKey="focus" stroke="#6366f1" fillOpacity={1} fill="url(#colorFocusHist)" strokeWidth={2} />
+                                   </AreaChart>
+                                 </ResponsiveContainer>
+                               </div>
+                             </div>
 
-                            {/* Confidence Over Time */}
-                            <div className="space-y-4">
-                              <div className="flex items-center gap-2">
-                                <Activity className="w-4 h-4 text-purple-400" />
-                                <h4 className="text-xs font-bold uppercase tracking-wider text-zinc-400">Confidence Trend</h4>
-                              </div>
-                              <div className="h-[200px] w-full">
-                                <ResponsiveContainer width="100%" height="100%">
-                                  <AreaChart data={session.results.map(r => ({ time: new Date(r.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), confidence: r.confidence }))}>
-                                    <defs>
-                                      <linearGradient id="colorConfHist" x1="0" y1="0" x2="0" y2="1">
-                                        <stop offset="5%" stopColor="#8b5cf6" stopOpacity={0.3}/>
-                                        <stop offset="95%" stopColor="#8b5cf6" stopOpacity={0}/>
-                                      </linearGradient>
-                                    </defs>
-                                    <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
-                                    <XAxis dataKey="time" stroke="#52525b" fontSize={10} tickLine={false} axisLine={false} />
-                                    <YAxis stroke="#52525b" fontSize={10} tickLine={false} axisLine={false} domain={[0, 100]} />
-                                    <RechartsTooltip 
-                                      contentStyle={{ backgroundColor: '#18181b', border: '1px solid #27272a', borderRadius: '12px' }}
-                                      itemStyle={{ fontSize: '12px', color: '#fff' }}
-                                    />
-                                    <Area type="monotone" dataKey="confidence" stroke="#8b5cf6" fillOpacity={1} fill="url(#colorConfHist)" strokeWidth={2} />
-                                  </AreaChart>
-                                </ResponsiveContainer>
-                              </div>
-                            </div>
+                             {/* BPM Over Time */}
+                             <div className="space-y-4">
+                               <div className="flex items-center gap-2">
+                                 <Activity className="w-4 h-4 text-red-400" />
+                                 <h4 className="text-xs font-bold uppercase tracking-wider text-zinc-400">Estimated Heart Rate (BPM)</h4>
+                               </div>
+                               <div className="h-[200px] w-full">
+                                 <ResponsiveContainer width="100%" height="100%">
+                                   <AreaChart data={session.results.map(r => ({ time: new Date(r.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), bpm: r.bpmEstimate }))}>
+                                     <defs>
+                                       <linearGradient id="colorBpmHist" x1="0" y1="0" x2="0" y2="1">
+                                         <stop offset="5%" stopColor="#f43f5e" stopOpacity={0.3}/>
+                                         <stop offset="95%" stopColor="#f43f5e" stopOpacity={0}/>
+                                       </linearGradient>
+                                     </defs>
+                                     <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+                                     <XAxis dataKey="time" stroke="#52525b" fontSize={10} tickLine={false} axisLine={false} />
+                                     <YAxis stroke="#52525b" fontSize={10} tickLine={false} axisLine={false} domain={[60, 120]} />
+                                     <RechartsTooltip 
+                                       contentStyle={{ backgroundColor: '#18181b', border: '1px solid #27272a', borderRadius: '12px' }}
+                                       itemStyle={{ fontSize: '12px', color: '#fff' }}
+                                     />
+                                     <Area type="monotone" dataKey="bpm" stroke="#f43f5e" fillOpacity={1} fill="url(#colorBpmHist)" strokeWidth={2} />
+                                   </AreaChart>
+                                 </ResponsiveContainer>
+                               </div>
+                             </div>
 
                             {/* Cognitive State Summary */}
                             <div className="lg:col-span-2 bg-zinc-900/50 rounded-2xl p-4 border border-zinc-800">
@@ -402,8 +384,7 @@ export default function SessionHistory({ sessions, onClose }: SessionHistoryProp
 
         {/* Footer */}
         <div className="p-6 border-t border-zinc-800 bg-zinc-900/50 flex justify-between items-center">
-          <p className="text-xs text-zinc-500 font-medium">Total Sessions: {sessions.length}</p>
-          <p className="text-xs text-zinc-500 font-medium italic">All data is securely synced to your cloud account</p>
+          <p className="text-xs text-zinc-500 font-medium italic">Only the most recent session is stored to optimize performance</p>
         </div>
       </motion.div>
     </motion.div>

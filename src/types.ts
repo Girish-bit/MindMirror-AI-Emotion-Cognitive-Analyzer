@@ -21,6 +21,12 @@ export interface AnalysisResult {
   voiceTone?: string;
   fusedInsight?: string;
   stressLevel?: number; // 0-100
+  // Advanced Professional Fields
+  focusScore: number;    // 0-100 (Proprietary metric)
+  bpmEstimate?: number;  // Estimated Heart Rate
+  aiCoachAdvice?: string; // Real-time intervention message
+  environmentalContext?: string; // Why the state is changing
+  xpEarned?: number;     // Gamification
   // XAI & Reasoning
   visualCues?: string[]; // e.g., ["Frown", "Narrowed eyes"]
   reasoning?: string;    // e.g., "Detected frown + low eye openness → predicted stress"
@@ -50,11 +56,15 @@ export interface Session {
   results: AnalysisResult[];
   metrics?: AggregatedMetrics;
   type: 'face' | 'wallet';
+  totalXp?: number;
+  sessionGrade?: 'A+' | 'A' | 'B' | 'C' | 'D';
 }
 
 export interface AggregatedMetrics {
   topEmotion: Emotion;
   averageConfidence: number;
+  averageFocusScore: number;
+  peakFocusScore: number;
   engagementDistribution: Record<string, number>;
   cognitiveStateDistribution: Record<string, number>;
 }

@@ -86,11 +86,11 @@ service cloud.firestore {
                       request.resource.data.role == resource.data.role;
     }
     
-    match /sessions/{sessionId} {
-      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid);
-      allow create: if isAuthenticated() && isValidSession(request.resource.data);
-      allow update: if isAuthenticated() && (resource.data.userId == request.auth.uid) && isValidSession(request.resource.data);
-      allow delete: if isAuthenticated() && (resource.data.userId == request.auth.uid);
+    match /sessions/{userId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidSession(request.resource.data);
+      allow update: if isOwner(userId) && isValidSession(request.resource.data);
+      allow delete: if isOwner(userId);
     }
 
     match /baselines/{userId} {

@@ -71,6 +71,8 @@ function calculateMetrics(results: AnalysisResult[]): AggregatedMetrics {
     return {
       topEmotion: 'Neutral',
       averageConfidence: 0,
+      averageFocusScore: 0,
+      peakFocusScore: 0,
       engagementDistribution: {},
       cognitiveStateDistribution: {},
     };
@@ -80,12 +82,16 @@ function calculateMetrics(results: AnalysisResult[]): AggregatedMetrics {
   const engagementDist: Record<string, number> = {};
   const cognitiveDist: Record<string, number> = {};
   let totalConfidence = 0;
+  let totalFocusScore = 0;
+  let peakFocusScore = 0;
 
   results.forEach(r => {
     emotions[r.emotion] = (emotions[r.emotion] || 0) + 1;
     engagementDist[r.engagement] = (engagementDist[r.engagement] || 0) + 1;
     cognitiveDist[r.cognitiveState] = (cognitiveDist[r.cognitiveState] || 0) + 1;
     totalConfidence += r.confidence;
+    totalFocusScore += (r.focusScore || 0);
+    if ((r.focusScore || 0) > peakFocusScore) peakFocusScore = r.focusScore || 0;
   });
 
   const topEmotion = Object.entries(emotions).reduce((a, b) => a[1] > b[1] ? a : b)[0] as Emotion;
@@ -93,6 +99,8 @@ function calculateMetrics(results: AnalysisResult[]): AggregatedMetrics {
   return {
     topEmotion,
     averageConfidence: Math.round(totalConfidence / results.length),
+    averageFocusScore: Math.round(totalFocusScore / results.length),
+    peakFocusScore,
     engagementDistribution: engagementDist,
     cognitiveStateDistribution: cognitiveDist,
   };
@@ -186,6 +194,10 @@ export default function App() {
       console.error("Error updating baseline:", err);
     }
   };
+  const [xp, setXp] = useState(0);
+  const [level, setLevel] = useState(1);
+  const [aiCoachMessage, setAiCoachMessage] = useState<string | null>(null);
+  const [bpmHistory, setBpmHistory] = useState<number[]>([]);
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [activeSession, setActiveSession] = useState<Session | null>(null);
@@ -193,6 +205,8 @@ export default function App() {
   const [showHistory, setShowHistory] = useState(false);
   const [analysisMode, setAnalysisMode] = useState<'face' | 'wallet'>('face');
   const [sessionMode, setSessionMode] = useState<SessionMode>('Standard');
+  const [sessionDurationLimit, setSessionDurationLimit] = useState<number | null>(null); // null = Manual, 5, 10
+  const [countdown, setCountdown] = useState<number | null>(null);
   const [textContext, setTextContext] = useState('');
   const [isRecording, setIsRecording] = useState(false);
   const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
@@ -283,18 +297,14 @@ export default function App() {
       return;
     }
 
-    const q = query(
-      collection(db, 'sessions'),
-      where('userId', '==', user.uid),
-      orderBy('startTime', 'desc')
-    );
-
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const sessionData = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      })) as Session[];
-      setSessions(sessionData);
+    // Since we only keep one session, we listen to the specific 'latest' document
+    const docRef = doc(db, 'sessions', user.uid);
+    const unsubscribe = onSnapshot(docRef, (snapshot) => {
+      if (snapshot.exists()) {
+        setSessions([{ id: snapshot.id, ...snapshot.data() } as Session]);
+      } else {
+        setSessions([]);
+      }
     }, (err) => {
       console.error("Firestore error:", err);
       setError("Failed to load history.");
@@ -313,27 +323,58 @@ export default function App() {
       type: analysisMode
     };
     setActiveSession(newSession);
-    // The useEffect will trigger the first capture
+    
+    if (sessionDurationLimit) {
+      setCountdown(sessionDurationLimit);
+    }
   };
+
+  // Countdown Timer Effect
+  useEffect(() => {
+    let timer: NodeJS.Timeout;
+    if (activeSession && countdown !== null) {
+      if (countdown > 0) {
+        timer = setTimeout(() => setCountdown(countdown - 1), 1000);
+      } else {
+        stopSession();
+        setCountdown(null);
+      }
+    }
+    return () => clearTimeout(timer);
+  }, [activeSession, countdown]);
 
   const stopSession = async () => {
     if (!activeSession || !user) return;
     
     const metrics = calculateMetrics(activeSession.results);
-    const completedSession = {
+    const totalSessionXp = activeSession.results.reduce((acc, r) => acc + (r.xpEarned || 0), 0);
+    
+    // Calculate Grade
+    let sessionGrade: 'A+' | 'A' | 'B' | 'C' | 'D' = 'C';
+    if (metrics.averageFocusScore > 90) sessionGrade = 'A+';
+    else if (metrics.averageFocusScore > 80) sessionGrade = 'A';
+    else if (metrics.averageFocusScore > 65) sessionGrade = 'B';
+    else if (metrics.averageFocusScore < 40) sessionGrade = 'D';
+
+    const completedSession: Session = {
+      id: user.uid,
       userId: user.uid,
       startTime: activeSession.startTime,
       endTime: Date.now(),
       results: activeSession.results,
       metrics,
       type: activeSession.type,
-      createdAt: serverTimestamp()
+      totalXp: totalSessionXp,
+      sessionGrade
     };
 
     try {
-      await addDoc(collection(db, 'sessions'), completedSession);
+      await setDoc(doc(db, 'sessions', user.uid), completedSession);
       await updateBaseline(activeSession.results);
       setActiveSession(null);
+      setCountdown(null);
+      setBpmHistory([]);
+      setAiCoachMessage(null);
     } catch (err) {
       console.error("Error saving session:", err);
       setError("Failed to save session to cloud.");
@@ -377,14 +418,7 @@ export default function App() {
     };
 
     socket.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (data.type === "STREAM_RESULT") {
-        const result = data.payload as AnalysisResult;
-        handleAnalysisResult(result);
-      } else if (data.type === "STREAM_ERROR") {
-        setError(data.message);
-        setIsAnalyzing(false);
-      }
+      console.log("DEBUG: WebSocket message received", event.data);
     };
 
     socket.onclose = () => setWs(null);
@@ -403,6 +437,31 @@ export default function App() {
       if (!prev) return null;
       return { ...prev, results: [...prev.results, result] };
     });
+
+    // Update Gamification
+    if (result.xpEarned) {
+      setXp(prev => {
+        const newXp = prev + result.xpEarned!;
+        if (newXp >= level * 100) {
+          setLevel(l => l + 1);
+          addNotification(`Level Up! You've reached Level ${level + 1}`, 'info');
+          return newXp - (level * 100);
+        }
+        return newXp;
+      });
+    }
+
+    // Update BPM History
+    if (result.bpmEstimate) {
+      setBpmHistory(prev => [...prev.slice(-19), result.bpmEstimate!]);
+    }
+
+    // AI Coach Intervention
+    if (result.aiCoachAdvice) {
+      setAiCoachMessage(result.aiCoachAdvice);
+      // Auto-clear coach message after 4 seconds
+      setTimeout(() => setAiCoachMessage(null), 4000);
+    }
 
     setTemporalWindow(prev => {
       const newWindow = [...prev.slice(-29), result];
@@ -448,33 +507,25 @@ export default function App() {
   };
 
   const capture = useCallback(async () => {
-    if (!webcamRef.current || !activeSessionRef.current || !ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!webcamRef.current || !activeSessionRef.current) return;
     
     const imageSrc = webcamRef.current.getScreenshot();
     if (!imageSrc) return;
 
     setIsAnalyzing(true);
     
-    // Compress and stream
     try {
       const finalImage = await compressImage(imageSrc, 640, 480, 0.6);
       
-      ws.send(JSON.stringify({
-        type: "STREAM_FRAME",
-        timestamp: Date.now(),
-        payload: {
-          image: finalImage,
-          audio: null, // Voice streaming can be added here
-          text: textContext,
-          mode: sessionMode,
-          sessionId: activeSessionRef.current.id
-        }
-      }));
+      // Call Gemini directly from frontend (Platform Rule: NEVER call from backend)
+      const result = await analyzeMultimodal(finalImage, undefined, textContext, sessionMode);
+      handleAnalysisResult(result);
     } catch (err) {
-      console.error("DEBUG: Stream capture failed:", err);
+      console.error("DEBUG: Analysis failed:", err);
       setIsAnalyzing(false);
+      setError(err instanceof Error ? err.message : "Analysis failed");
     }
-  }, [ws, textContext, sessionMode]);
+  }, [textContext, sessionMode, handleAnalysisResult]);
 
   // Real-time analysis loop (High-frequency streaming: 1 frame per 2 seconds)
   useEffect(() => {
@@ -523,12 +574,26 @@ export default function App() {
               <Brain className="w-6 h-6 text-indigo-400" />
             </div>
             <div>
-              <h1 className="text-xl font-bold tracking-tight">MindMirror <span className="text-indigo-400">AI</span></h1>
-              <p className="text-xs text-zinc-500 font-medium uppercase tracking-widest">Cognitive & Object Intelligence</p>
+              <h1 className="text-xl font-bold tracking-tight">MindMirror <span className="text-indigo-400">PRO</span></h1>
+              <p className="text-xs text-zinc-500 font-medium uppercase tracking-widest">Cognitive Performance Suite</p>
             </div>
           </div>
           
-            <div className="flex items-center gap-6">
+          <div className="flex-1 max-w-md mx-12 hidden lg:block">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Level {level}</span>
+              <span className="text-[10px] font-bold text-indigo-400 uppercase tracking-widest">{xp} / {level * 100} XP</span>
+            </div>
+            <div className="h-1.5 bg-zinc-800 rounded-full overflow-hidden border border-zinc-700/50">
+              <motion.div 
+                initial={{ width: 0 }}
+                animate={{ width: `${(xp / (level * 100)) * 100}%` }}
+                className="h-full bg-gradient-to-r from-indigo-500 to-purple-500"
+              />
+            </div>
+          </div>
+
+          <div className="flex items-center gap-6">
               <div className="flex items-center gap-2 bg-zinc-800/50 p-1 rounded-xl border border-zinc-700/50">
                 {(['Standard', 'Student', 'Interview', 'Agriculture'] as SessionMode[]).map((m) => (
                   <button
@@ -623,14 +688,44 @@ export default function App() {
                   animate={{ opacity: 1 }}
                   className="absolute inset-0 pointer-events-none"
                 >
+                  {/* Biometric Scan Overlay */}
+                  <div className="absolute inset-0 bg-indigo-500/5 opacity-[0.03] animate-pulse" />
                   <div className="absolute top-1/4 left-1/4 w-1/2 h-1/2 border-2 border-indigo-500/50 rounded-3xl shadow-[0_0_30px_rgba(99,102,241,0.3)]">
                     <div className="absolute -top-10 left-0 bg-indigo-500 text-white text-[10px] font-bold px-3 py-1 rounded-full flex items-center gap-2">
-                      <User className="w-3 h-3" />
-                      ID: {user?.uid.slice(0, 8)}
+                      <Activity className="w-3 h-3 animate-pulse" />
+                      BIOMETRIC SCAN ACTIVE
                     </div>
+                    
+                    {/* Corner Accents */}
+                    <div className="absolute -top-1 -left-1 w-4 h-4 border-t-2 border-l-2 border-indigo-400" />
+                    <div className="absolute -top-1 -right-1 w-4 h-4 border-t-2 border-r-2 border-indigo-400" />
+                    <div className="absolute -bottom-1 -left-1 w-4 h-4 border-b-2 border-l-2 border-indigo-400" />
+                    <div className="absolute -bottom-1 -right-1 w-4 h-4 border-b-2 border-r-2 border-indigo-400" />
                   </div>
                 </motion.div>
               )}
+
+              {/* AI Coach Floating Bubble */}
+              <AnimatePresence>
+                {aiCoachMessage && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 20, scale: 0.9 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.9 }}
+                    className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50"
+                  >
+                    <div className="bg-white text-black px-6 py-4 rounded-3xl shadow-2xl flex items-center gap-4 border-4 border-indigo-500">
+                      <div className="p-2 bg-indigo-500 rounded-xl">
+                        <Brain className="w-6 h-6 text-white" />
+                      </div>
+                      <div>
+                        <p className="text-[10px] font-bold text-indigo-600 uppercase tracking-widest">AI Coach Intervention</p>
+                        <p className="text-sm font-bold leading-tight">{aiCoachMessage}</p>
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
 
               {/* Overlay UI */}
               <div className="absolute inset-0 p-6 flex flex-col justify-between pointer-events-none">
@@ -672,21 +767,60 @@ export default function App() {
                 
                 <div className="flex justify-center gap-4">
                   {!activeSession ? (
-                    <button
-                      onClick={startSession}
-                      className="pointer-events-auto group/btn relative flex items-center gap-3 bg-white text-black px-10 py-5 rounded-2xl font-bold transition-all hover:scale-105 active:scale-95 shadow-[0_0_40px_rgba(255,255,255,0.2)] animate-pulse hover:animate-none"
-                    >
-                      <Brain className="w-6 h-6 fill-black" />
-                      Start Analysis
-                    </button>
+                    <div className="flex flex-col items-center gap-4">
+                      <div className="flex items-center gap-2 bg-zinc-800/80 backdrop-blur-md p-1.5 rounded-2xl border border-zinc-700/50 pointer-events-auto">
+                        <button
+                          onClick={() => setSessionDurationLimit(null)}
+                          className={cn(
+                            "px-4 py-2 rounded-xl text-[10px] font-bold transition-all",
+                            sessionDurationLimit === null ? "bg-indigo-500 text-white" : "text-zinc-500 hover:text-zinc-300"
+                          )}
+                        >
+                          Manual
+                        </button>
+                        <button
+                          onClick={() => setSessionDurationLimit(5)}
+                          className={cn(
+                            "px-4 py-2 rounded-xl text-[10px] font-bold transition-all",
+                            sessionDurationLimit === 5 ? "bg-indigo-500 text-white" : "text-zinc-500 hover:text-zinc-300"
+                          )}
+                        >
+                          5s
+                        </button>
+                        <button
+                          onClick={() => setSessionDurationLimit(10)}
+                          className={cn(
+                            "px-4 py-2 rounded-xl text-[10px] font-bold transition-all",
+                            sessionDurationLimit === 10 ? "bg-indigo-500 text-white" : "text-zinc-500 hover:text-zinc-300"
+                          )}
+                        >
+                          10s
+                        </button>
+                      </div>
+                      
+                      <button
+                        onClick={startSession}
+                        className="pointer-events-auto group/btn relative flex items-center gap-3 bg-white text-black px-10 py-5 rounded-2xl font-bold transition-all hover:scale-105 active:scale-95 shadow-[0_0_40px_rgba(255,255,255,0.2)] animate-pulse hover:animate-none"
+                      >
+                        <Brain className="w-6 h-6 fill-black" />
+                        Start {sessionDurationLimit ? `${sessionDurationLimit}s ` : ""}Analysis
+                      </button>
+                    </div>
                   ) : (
-                    <button
-                      onClick={stopSession}
-                      className="pointer-events-auto flex items-center gap-3 bg-red-500/20 backdrop-blur-md text-red-400 px-8 py-4 rounded-2xl font-bold transition-all hover:bg-red-500/30 border border-red-500/30"
-                    >
-                      <Square className="w-5 h-5 fill-current" />
-                      End Session
-                    </button>
+                    <div className="flex flex-col items-center gap-4">
+                      {countdown !== null && (
+                        <div className="bg-indigo-500 text-white px-6 py-2 rounded-full font-bold text-lg shadow-lg shadow-indigo-500/30 animate-bounce">
+                          {countdown}s remaining
+                        </div>
+                      )}
+                      <button
+                        onClick={stopSession}
+                        className="pointer-events-auto flex items-center gap-3 bg-red-500/20 backdrop-blur-md text-red-400 px-8 py-4 rounded-2xl font-bold transition-all hover:bg-red-500/30 border border-red-500/30"
+                      >
+                        <Square className="w-5 h-5 fill-current" />
+                        End Session
+                      </button>
+                    </div>
                   )}
                 </div>
               </div>
@@ -721,28 +855,47 @@ export default function App() {
                 {/* Real-time Gauges */}
                 <div className="grid grid-cols-3 gap-6 bg-zinc-900/50 border border-zinc-800 p-8 rounded-[2.5rem]">
                   <Gauge 
-                    value={temporalWindow.length > 0 ? temporalWindow[temporalWindow.length-1].attentionScore || 0 : 0} 
-                    label="Attention" 
+                    value={temporalWindow.length > 0 ? temporalWindow[temporalWindow.length-1].focusScore || 0 : 0} 
+                    label="Focus Score" 
                     color="#6366f1" 
                   />
                   <Gauge 
                     value={temporalWindow.length > 0 ? temporalWindow[temporalWindow.length-1].stressLevel || 0 : 0} 
-                    label="Stress" 
+                    label="Stress Index" 
                     color="#f43f5e" 
                   />
-                  <Gauge 
-                    value={temporalWindow.length > 0 ? temporalWindow[temporalWindow.length-1].confidence : 0} 
-                    label="Confidence" 
-                    color="#a855f7" 
-                  />
+                  <div className="relative flex flex-col items-center justify-center">
+                    <motion.div 
+                      animate={{ scale: [1, 1.1, 1] }}
+                      transition={{ duration: 0.8, repeat: Infinity }}
+                      className="p-4 bg-red-500/10 rounded-full mb-2"
+                    >
+                      <Activity className="w-8 h-8 text-red-500" />
+                    </motion.div>
+                    <span className="text-2xl font-bold text-white">
+                      {temporalWindow.length > 0 ? temporalWindow[temporalWindow.length-1].bpmEstimate || '--' : '--'}
+                    </span>
+                    <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">Est. BPM</span>
+                  </div>
                 </div>
 
                 {/* Trends & XAI Panel */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                   <div className="bg-zinc-900/50 border border-zinc-800 p-6 rounded-[2rem] space-y-4">
-                    <div className="flex items-center gap-2">
-                      <TrendingUp className="w-4 h-4 text-indigo-400" />
-                      <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-400">Temporal Trends</h3>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <TrendingUp className="w-4 h-4 text-indigo-400" />
+                        <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-400">Performance Trends</h3>
+                      </div>
+                      {temporalWindow.length > 0 && temporalWindow[temporalWindow.length-1].xpEarned && (
+                        <motion.span 
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          className="text-[10px] font-bold text-green-400"
+                        >
+                          +{temporalWindow[temporalWindow.length-1].xpEarned} XP
+                        </motion.span>
+                      )}
                     </div>
                     <div className="space-y-3">
                       <div className="flex justify-between items-center p-3 bg-zinc-800/30 rounded-xl border border-zinc-800">
@@ -759,6 +912,12 @@ export default function App() {
                           trends.focus === 'Improving' ? "bg-green-500/20 text-green-400" : "bg-zinc-800 text-zinc-400"
                         )}>{trends.focus}</span>
                       </div>
+                      {temporalWindow.length > 0 && temporalWindow[temporalWindow.length-1].environmentalContext && (
+                        <div className="p-3 bg-indigo-500/5 rounded-xl border border-indigo-500/10">
+                          <p className="text-[10px] font-bold text-indigo-400 uppercase mb-1">Environmental Context</p>
+                          <p className="text-[11px] text-zinc-400 leading-tight">{temporalWindow[temporalWindow.length-1].environmentalContext}</p>
+                        </div>
+                      )}
                     </div>
                   </div>
 
